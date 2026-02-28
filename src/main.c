@@ -10,6 +10,7 @@
 
 #ifdef _WIN32
 #  include <windows.h>
+#  include <wincrypt.h>
 #  define sleep_ms(ms) Sleep(ms)
 #else
 #  include <unistd.h>

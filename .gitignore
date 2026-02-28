@@ -1,0 +1,46 @@
+# ── Build output ─────────────────────────────────────────────────────
+build/
+out/
+*.exe
+*.exp
+*.lib
+*.ilk
+*.pdb
+*.obj
+*.o
+build.log
+
+# ── CMake generated ───────────────────────────────────────────────────
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# ── Visual Studio / MSVC ─────────────────────────────────────────────
+.vs/
+*.vcxproj.user
+*.sln.docstates
+*.suo
+*.user
+*.aps
+*.ncb
+*.opendb
+*.sdf
+*.opensdf
+x64/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+
+# ── IDE config files (machine-specific) ──────────────────────────────
+CppProperties.json
+.vscode/settings.json
+
+# ── Logs & temp ───────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak

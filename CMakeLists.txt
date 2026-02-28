@@ -31,7 +31,7 @@ set(VENDOR_SOURCES
 # ──────────────────────────────────────────────
 if(WIN32)
     set(PLATFORM_SOURCES src/platform/service_win.c)
-    set(PLATFORM_LIBS ws2_32)
+    set(PLATFORM_LIBS ws2_32 advapi32 rpcrt4)
 else()
     set(PLATFORM_SOURCES src/platform/service_linux.c)
     set(PLATFORM_LIBS pthread dl m)
@@ -80,7 +80,6 @@ endif()
 # Mongoose TLS optional — disabled by default (set MG_TLS=MG_TLS_NONE)
 target_compile_definitions(orchestrator PRIVATE
     MG_TLS=0
-    MG_ARCH=0          # auto-detect
     SQLITE_THREADSAFE=1
 )
 
