@@ -1,0 +1,14 @@
+{
+  "machines": [
+    {
+      "id":        "local",
+      "hostname":  "localhost",
+      "ip":        "127.0.0.1",
+      "enabled":   true,
+      "cores":     4,
+      "gpu_count": 0,
+      "ram_mb":    8192,
+      "disk_mb":   102400
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+[Unit]
+Description=Orchestrator Job Scheduler
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/orchestrator --conf /etc/orch/orchestrator.conf --daemon --pidfile /var/run/orchestrator.pid
+PIDFile=/var/run/orchestrator.pid
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orchestrator
+
+[Install]
+WantedBy=multi-user.target
