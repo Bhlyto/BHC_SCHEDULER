@@ -33,6 +33,21 @@ int  db_insert_api_key(const char *key_hash, const char *label);
 int  db_validate_api_key(const char *key_hash);
 int  db_revoke_api_key(const char *key_hash);
 
+/* ── Stats ─────────────────────────────────────── */
+
+typedef struct {
+    int total;
+    int in_queue;
+    int starting;
+    int running;
+    int finished;
+    int cancelled;
+    int failed;
+} JobStats;
+
+/* Count jobs by status. Returns 0 on success. */
+int db_job_stats(JobStats *out);
+
 /* ── Allocations ───────────────────────────────── */
 int db_insert_allocation(const char *job_id, const char *machine_id,
                           int cores, int gpu, int ram_mb, int disk_mb);

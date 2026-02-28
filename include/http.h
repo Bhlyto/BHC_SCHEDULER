@@ -17,6 +17,10 @@ int  httpd_start(int port);
 /* Signal the HTTP thread to stop. */
 void httpd_stop(void);
 
+/* Register a mongoose connection as an SSE subscriber.
+   Must be called from the HTTP thread (inside a route handler). */
+void httpd_sse_add(struct mg_connection *c);
+
 /* ── Auth ────────────────────────────────────── */
 
 /* Extract X-API-Key header, SHA-256 hash it, look up in DB.

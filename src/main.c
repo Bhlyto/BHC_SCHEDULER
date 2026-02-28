@@ -12,6 +12,33 @@
 #  include <windows.h>
 #  include <wincrypt.h>
 #  define sleep_ms(ms) Sleep(ms)
+
+/* Resolve a path relative to the directory that contains the executable.
+   Falls back to 'rel' as-is if GetModuleFileNameA fails. */
+static void exe_relative_path(const char *rel, char *out, size_t out_sz)
+{
+    char exe[MAX_PATH] = {0};
+    GetModuleFileNameA(NULL, exe, sizeof(exe));
+    char *sep = strrchr(exe, '\\');
+    if (sep) { *(sep + 1) = '\0'; _snprintf(out, out_sz, "%s%s", exe, rel); }
+    else      { strncpy(out, rel, out_sz - 1); }
+}
+
+/* For each relative path in g_config, resolve it from the exe directory.
+   Absolute paths (contain ':' on Windows) are left untouched. */
+static void resolve_config_paths(void)
+{
+    char tmp[MAX_PATH];
+#define RESOLVE(field) \
+    if (!strchr(g_config.field, ':')) { \
+        exe_relative_path(g_config.field, tmp, sizeof(tmp)); \
+        strncpy(g_config.field, tmp, sizeof(g_config.field) - 1); \
+    }
+    RESOLVE(db_path);
+    RESOLVE(work_dir);
+    RESOLVE(provisioning_json);
+#undef RESOLVE
+}
 #else
 #  include <unistd.h>
 #  define sleep_ms(ms) usleep((ms) * 1000)
@@ -42,7 +69,9 @@ void orchestrator_run(void)
     /* 2. Load provisioning (non-fatal: can be populated via /provision API) */
     int machine_count = registry_load(g_config.provisioning_json);
     if (machine_count < 0)
-        log_warn("main", "No provisioning.json loaded — add machines via POST /provision");
+        log_warn("main", "No provisioning.json loaded (%s) — add machines via POST /provision", g_config.provisioning_json);
+    else
+        log_info("main", "%d machine(s) loaded from %s", machine_count, g_config.provisioning_json);
 
     /* 3. Start scheduler */
     scheduler_init();
@@ -78,7 +107,12 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "keygen") == 0) {
         /* Usage: orchestrator keygen --label "my-app" [--conf path] */
         const char *label  = "default";
+#ifdef _WIN32
+        char _conf_buf[MAX_PATH]; exe_relative_path("config\\orchestrator.conf", _conf_buf, sizeof(_conf_buf));
+        const char *conf = _conf_buf;
+#else
         const char *conf   = "config/orchestrator.conf";
+#endif
         for (int i = 2; i < argc - 1; i++) {
             if (strcmp(argv[i], "--label") == 0) label = argv[i+1];
             if (strcmp(argv[i], "--conf")  == 0) conf  = argv[i+1];
@@ -86,6 +120,9 @@ int main(int argc, char **argv)
         config_defaults();
         config_load(conf);
         log_set_level(g_config.log_level);
+#ifdef _WIN32
+        resolve_config_paths();
+#endif
 
         if (db_open(g_config.db_path) != 0) {
             fprintf(stderr, "Cannot open DB at %s\n", g_config.db_path);
@@ -125,13 +162,21 @@ int main(int argc, char **argv)
     }
 
     /* Default: start the service/daemon */
+#ifdef _WIN32
+    char _conf_buf2[MAX_PATH]; exe_relative_path("config\\orchestrator.conf", _conf_buf2, sizeof(_conf_buf2));
+    const char *conf = _conf_buf2;
+#else
     const char *conf = "config/orchestrator.conf";
+#endif
     for (int i = 1; i < argc - 1; i++)
         if (strcmp(argv[i], "--conf") == 0) conf = argv[i+1];
 
     config_defaults();
     config_load(conf);
     log_set_level(g_config.log_level);
+#ifdef _WIN32
+    resolve_config_paths();
+#endif
 
     log_info("main", "Config loaded from %s", conf);
     platform_service_start(argc, argv);

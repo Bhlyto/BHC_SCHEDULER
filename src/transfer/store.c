@@ -51,6 +51,16 @@ void store_output_dir(const char *job_id, char *buf, int len)
     snprintf(buf, len, "%s%s%s%soutput", g_config.work_dir, SEP, job_id, SEP);
 }
 
+void store_stdout_path(const char *job_id, char *buf, int len)
+{
+    snprintf(buf, len, "%s%s%s%sstdout.log", g_config.work_dir, SEP, job_id, SEP);
+}
+
+void store_stderr_path(const char *job_id, char *buf, int len)
+{
+    snprintf(buf, len, "%s%s%s%sstderr.log", g_config.work_dir, SEP, job_id, SEP);
+}
+
 int store_init_job_dirs(const char *job_id)
 {
     char path[512];

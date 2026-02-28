@@ -19,11 +19,15 @@
  * Route table:
  *   POST   /jobs                      → submit_job
  *   GET    /jobs                      → list_jobs
+ *   GET    /jobs/events               → sse_subscribe  (Server-Sent Events)
  *   GET    /jobs/:id                  → get_job
  *   DELETE /jobs/:id                  → cancel_job
  *   POST   /jobs/:id/input/:filename  → upload_input
  *   GET    /jobs/:id/output/:filename → download_output
+ *   GET    /jobs/:id/log              → get_job_log  (stdout.log)
+ *   GET    /jobs/:id/log/stderr       → get_job_log_err (stderr.log)
  *   GET    /resources                 → get_resources
+ *   GET    /stats                     → get_stats
  *   POST   /provision                 → add_machine
  *   DELETE /provision/:id             → remove_machine
  */
@@ -79,10 +83,15 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm)
 
     cJSON *jcmd  = cJSON_GetObjectItemCaseSensitive(req, "command");
     cJSON *jpri  = cJSON_GetObjectItemCaseSensitive(req, "priority");
-    cJSON *jcor  = cJSON_GetObjectItemCaseSensitive(req, "cores");
-    cJSON *jgpu  = cJSON_GetObjectItemCaseSensitive(req, "gpu");
-    cJSON *jram  = cJSON_GetObjectItemCaseSensitive(req, "ram_mb");
-    cJSON *jdisk = cJSON_GetObjectItemCaseSensitive(req, "disk_mb");
+    cJSON *jcor  = cJSON_GetObjectItemCaseSensitive(req, "req_cores");
+    cJSON *jgpu  = cJSON_GetObjectItemCaseSensitive(req, "req_gpu");
+    cJSON *jram  = cJSON_GetObjectItemCaseSensitive(req, "req_ram_mb");
+    cJSON *jdisk = cJSON_GetObjectItemCaseSensitive(req, "req_disk_mb");
+    /* Also accept short names for convenience */
+    if (!jcor)  jcor  = cJSON_GetObjectItemCaseSensitive(req, "cores");
+    if (!jgpu)  jgpu  = cJSON_GetObjectItemCaseSensitive(req, "gpu");
+    if (!jram)  jram  = cJSON_GetObjectItemCaseSensitive(req, "ram_mb");
+    if (!jdisk) jdisk = cJSON_GetObjectItemCaseSensitive(req, "disk_mb");
 
     if (!cJSON_IsString(jcmd)) {
         cJSON_Delete(req);
@@ -184,6 +193,105 @@ static void download_output(struct mg_connection *c, struct mg_http_message *hm,
 {
     if (download_handle(c, hm, job_id, filename) != 0)
         http_error(c, 404, "Output file not found");
+}
+
+/* GET /jobs/:id/log[/stderr]  — stream a captured log file */
+static void get_job_log(struct mg_connection *c, struct mg_http_message *hm,
+                        const char *job_id, int use_stderr)
+{
+    (void)hm;
+    char path[512];
+    if (use_stderr) store_stderr_path(job_id, path, sizeof(path));
+    else            store_stdout_path(job_id, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) { http_error(c, 404, use_stderr ? "stderr.log not found" : "stdout.log not found"); return; }
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+
+    mg_printf(c,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain; charset=utf-8\r\n"
+        "Content-Length: %ld\r\n"
+        "\r\n", sz);
+
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        mg_send(c, buf, n);
+    fclose(f);
+}
+
+/* GET /jobs/events — Server-Sent Events stream */
+static void sse_subscribe(struct mg_connection *c, struct mg_http_message *hm)
+{
+    (void)hm;
+    mg_printf(c,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: keep-alive\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "\r\n");
+    httpd_sse_add(c);
+
+    /* Send an immediate snapshot so the client starts up-to-date */
+    Job jobs[256];
+    int count = db_list_jobs(jobs, 256);
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < count; i++) cJSON_AddItemToArray(arr, job_to_json(&jobs[i]));
+    char *s = cJSON_PrintUnformatted(arr);
+    mg_printf(c, "event: snapshot\ndata: %s\n\n", s);
+    free(s);
+    cJSON_Delete(arr);
+}
+
+/* GET /stats */
+static void get_stats(struct mg_connection *c, struct mg_http_message *hm)
+{
+    (void)hm;
+    JobStats js; memset(&js, 0, sizeof(js));
+    db_job_stats(&js);
+
+    int mcount;
+    Machine *ms = registry_all(&mcount);
+    int enabled = 0, cores_total = 0, cores_used = 0, ram_total = 0, ram_used = 0;
+    for (int i = 0; i < mcount; i++) {
+        if (ms[i].enabled) enabled++;
+        cores_total += ms[i].cores_total;  cores_used += ms[i].cores_reserved;
+        ram_total   += ms[i].ram_mb_total; ram_used   += ms[i].ram_mb_reserved;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+
+    cJSON *jobs = cJSON_CreateObject();
+    cJSON_AddNumberToObject(jobs, "total",     js.total);
+    cJSON_AddNumberToObject(jobs, "in_queue",  js.in_queue);
+    cJSON_AddNumberToObject(jobs, "starting",  js.starting);
+    cJSON_AddNumberToObject(jobs, "running",   js.running);
+    cJSON_AddNumberToObject(jobs, "finished",  js.finished);
+    cJSON_AddNumberToObject(jobs, "failed",    js.failed);
+    cJSON_AddNumberToObject(jobs, "cancelled", js.cancelled);
+    cJSON_AddItemToObject(root, "jobs", jobs);
+
+    cJSON *machines = cJSON_CreateObject();
+    cJSON_AddNumberToObject(machines, "total",   mcount);
+    cJSON_AddNumberToObject(machines, "enabled", enabled);
+    cJSON_AddItemToObject(root, "machines", machines);
+
+    cJSON *resources = cJSON_CreateObject();
+    cJSON_AddNumberToObject(resources, "cores_total",  cores_total);
+    cJSON_AddNumberToObject(resources, "cores_used",   cores_used);
+    cJSON_AddNumberToObject(resources, "ram_mb_total", ram_total);
+    cJSON_AddNumberToObject(resources, "ram_mb_used",  ram_used);
+    cJSON_AddItemToObject(root, "resources", resources);
+
+    char *s = cJSON_PrintUnformatted(root);
+    http_json_reply(c, 200, s);
+    free(s);
+    cJSON_Delete(root);
 }
 
 /* GET /resources */
@@ -290,6 +398,10 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
         if (strcmp(method, "GET") == 0 && seg[1][0] == '\0') {
             list_jobs(c, hm); return;
         }
+        /* GET /jobs/events — must be checked before /jobs/:id */
+        if (strcmp(method, "GET") == 0 && strcmp(seg[1], "events") == 0) {
+            sse_subscribe(c, hm); return;
+        }
         if (seg[1][0] != '\0') {
             /* /jobs/:id */
             if (strcmp(method, "GET") == 0 && seg[2][0] == '\0') {
@@ -306,12 +418,21 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
             if (strcmp(method, "GET") == 0 && strcmp(seg[2], "output") == 0 && seg[3][0]) {
                 download_output(c, hm, seg[1], seg[3]); return;
             }
+            /* /jobs/:id/log and /jobs/:id/log/stderr */
+            if (strcmp(method, "GET") == 0 && strcmp(seg[2], "log") == 0) {
+                get_job_log(c, hm, seg[1], strcmp(seg[3], "stderr") == 0); return;
+            }
         }
     }
 
     /* /resources */
     if (strcmp(seg[0], "resources") == 0 && strcmp(method, "GET") == 0) {
         get_resources(c, hm); return;
+    }
+
+    /* /stats */
+    if (strcmp(seg[0], "stats") == 0 && strcmp(method, "GET") == 0) {
+        get_stats(c, hm); return;
     }
 
     /* /provision */

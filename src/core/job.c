@@ -1,6 +1,7 @@
 #include "job.h"
 #include "db.h"
 #include "log.h"
+#include "events.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -117,5 +118,13 @@ int job_set_status(Job *job, JobStatus new_status)
             db_update_job_status(job->id, new_status, 0, 0);
             break;
     }
+
+    /* Broadcast SSE event to all monitoring clients */
+    char evt[EVENTS_JSON_MAX];
+    snprintf(evt, sizeof(evt),
+        "{\"event\":\"job_status\",\"id\":\"%s\",\"status\":\"%s\",\"machine_id\":\"%s\"}",
+        job->id, job_status_str(new_status), job->machine_id);
+    events_push(evt);
+
     return 0;
 }

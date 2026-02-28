@@ -269,3 +269,26 @@ int db_audit(const char *event, const char *detail)
     sqlite3_finalize(st);
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
+/* ── Stats ──────────────────────────────────────────── */
+int db_job_stats(JobStats *out)
+{
+    memset(out, 0, sizeof(*out));
+    const char *sql = "SELECT status, COUNT(*) FROM jobs GROUP BY status;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        int status = sqlite3_column_int(st, 0);
+        int count  = sqlite3_column_int(st, 1);
+        out->total += count;
+        switch ((JobStatus)status) {
+            case JOB_STATUS_IN_QUEUE:  out->in_queue  += count; break;
+            case JOB_STATUS_STARTING:  out->starting  += count; break;
+            case JOB_STATUS_RUNNING:   out->running   += count; break;
+            case JOB_STATUS_FINISHED:  out->finished  += count; break;
+            case JOB_STATUS_CANCELLED: out->cancelled += count; break;
+            case JOB_STATUS_FAILED:    out->failed    += count; break;
+        }
+    }
+    sqlite3_finalize(st);
+    return 0;
+}

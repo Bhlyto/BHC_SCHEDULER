@@ -58,6 +58,7 @@ set(CORE_SOURCES
     src/http/routes.c
     src/http/response.c
     src/http/httpd.c
+    src/http/events.c
 )
 
 # ──────────────────────────────────────────────
@@ -72,19 +73,31 @@ add_executable(orchestrator
 
 target_link_libraries(orchestrator ${PLATFORM_LIBS})
 
+# Copy config/ next to the executable after each build
+add_custom_command(TARGET orchestrator POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/config"
+        "$<TARGET_FILE_DIR:orchestrator>/config"
+    COMMENT "Copying config/ to output directory"
+)
+
 # SQLite needs these on Linux
 if(UNIX)
     target_link_libraries(orchestrator pthread dl m)
 endif()
 
-# Mongoose TLS optional — disabled by default (set MG_TLS=MG_TLS_NONE)
+# Mongoose TLS optional — disabled by default
+# MG_ARCH is set explicitly to avoid the conditional #include "mongoose_config.h"
+# which would fail on platforms where the file is absent.
 target_compile_definitions(orchestrator PRIVATE
     MG_TLS=0
     SQLITE_THREADSAFE=1
 )
 
 if(WIN32)
-    target_compile_definitions(orchestrator PRIVATE _WIN32_WINNT=0x0601)
+    target_compile_definitions(orchestrator PRIVATE MG_ARCH=2 _WIN32_WINNT=0x0601)  # MG_ARCH_WIN32
+else()
+    target_compile_definitions(orchestrator PRIVATE MG_ARCH=1)  # MG_ARCH_UNIX
 endif()
 
 # ──────────────────────────────────────────────

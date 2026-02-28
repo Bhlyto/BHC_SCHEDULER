@@ -19,6 +19,10 @@ void store_input_dir(const char *job_id,  char *buf, int len);
 /* Full path to the output directory for a job (caller-supplied buf, len). */
 void store_output_dir(const char *job_id, char *buf, int len);
 
+/* Full paths to the captured stdout/stderr log files. */
+void store_stdout_path(const char *job_id, char *buf, int len);
+void store_stderr_path(const char *job_id, char *buf, int len);
+
 /* ── Upload ──────────────────────────────────── */
 
 /* Write raw body from an HTTP message into input_dir/<filename>.
