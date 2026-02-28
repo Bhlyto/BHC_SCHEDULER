@@ -1,12 +1,31 @@
-# BHC Scheduler — Orchestrateur de jobs
+# BHC Scheduler — Job Orchestrator
 
-Démon léger écrit en C qui expose une API REST pour soumettre, suivre et annuler des jobs sur un parc de machines. Repose sur [Mongoose](https://mongoose.ws/) (HTTP), SQLite (persistance) et cJSON.
+A lightweight daemon written in C that exposes a REST API for submitting, tracking, and cancelling jobs across a pool of machines. Built on [Mongoose](https://mongoose.ws/) (HTTP/SSE), SQLite (persistence), and cJSON.
 
 ---
 
-## Prérequis
+## Features
 
-| Outil | Version minimale |
+- **Job queue** — submit commands with resource requirements; the scheduler dispatches them as machines become available
+- **Priority scheduling** — lower priority value = higher priority (default `50`)
+- **Resource-aware allocation** — jobs declare `req_cores`, `req_gpu`, `req_ram_mb`, `req_disk_mb`; the allocator matches them against available capacity
+- **Multi-machine jobs** — when no single machine can satisfy a core request, the allocator can spread the job across multiple machines automatically
+- **Machine pools** — define hundreds of machines compactly in `provisioning.json` using prefix/format ranges; add or remove machines at runtime without restart
+- **File I/O** — upload input files before a job runs; download output files after it finishes
+- **Job logs** — stdout and stderr of each job are captured and retrievable via API
+- **Pre-job scripts** — run a setup script before each job; receives job context via environment variables
+- **Real-time events** — subscribe to a Server-Sent Events (SSE) stream for live job state updates and an initial snapshot
+- **Stats endpoint** — aggregated view of job counts by state and cluster resource utilisation
+- **API key authentication** — SHA-256 hashed keys stored in SQLite; generated via CLI
+- **Auto-cleanup** — work directories are deleted automatically after a configurable TTL
+- **Bulk purge** — single call to delete all finished/failed/cancelled jobs and their work directories
+- **Cross-platform** — runs as a Windows Service or Linux daemon
+
+---
+
+## Requirements
+
+| Tool | Minimum version |
 |---|---|
 | CMake | 3.16 |
 | Visual Studio / MSVC (Windows) | VS 2019+ (toolset v142+) |
@@ -14,85 +33,74 @@ Démon léger écrit en C qui expose une API REST pour soumettre, suivre et annu
 
 ---
 
-## Installation
+## Build
 
 ### Windows
 
 ```powershell
-# 1. Cloner le dépôt
-git clone https://github.com/<votre-org>/BHC_SCHEDULER.git
+git clone https://github.com/<your-org>/BHC_SCHEDULER.git
 cd BHC_SCHEDULER
 
-# 2. Générer les fichiers de build
 cmake -S . -B build
-
-# 3. Compiler (Debug)
 cmake --build build --config Debug
 
-# L'exécutable est déposé dans :
-#   build\bin\Debug\orchestrator.exe
-# Le dossier config\ est copié automatiquement à côté de l'exe.
+# Output: build\bin\Debug\orchestrator.exe
+# config\ is copied automatically next to the executable.
 ```
 
 ### Linux
 
 ```bash
-git clone https://github.com/<votre-org>/BHC_SCHEDULER.git
+git clone https://github.com/<your-org>/BHC_SCHEDULER.git
 cd BHC_SCHEDULER
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# L'exécutable :  build/bin/orchestrator
+# Output: build/bin/orchestrator
 ```
 
 ---
 
 ## Configuration
 
-Le fichier `config/orchestrator.conf` est copié automatiquement à côté de l'exécutable à chaque build. Tous les paramètres sont optionnels — les valeurs par défaut sont utilisées si le fichier est absent.
+`config/orchestrator.conf` is copied next to the executable on every build. All keys are optional.
 
 ```ini
-# ── HTTP ──────────────────────────────────────────
-listen_port         = 8080
+# HTTP
+listen_port           = 8080
 
-# ── Chemins ───────────────────────────────────────
-# Chemins relatifs à l'exécutable (Windows)
-work_dir            = jobs
-db_path             = orchestrator.db
-provisioning_json   = provisioning.json
+# Paths (relative to the executable on Windows)
+work_dir              = jobs
+db_path               = orchestrator.db
+provisioning_json     = config/provisioning.json
 
-# ── Logs ──────────────────────────────────────────
-# debug | info | warn | error
-log_level           = info
+# Logging: debug | info | warn | error
+log_level             = info
 
-# ── Scheduler ─────────────────────────────────────
-scheduler_poll_ms   = 500
+# Scheduler poll interval (milliseconds)
+scheduler_poll_ms     = 500
 
-# ── Nettoyage automatique ─────────────────────────
-# Supprime work_dir/input+output après N secondes (0 = désactivé)
-cleanup_ttl_seconds = 3600
+# Auto-cleanup: delete input+output dirs N seconds after a terminal state (0 = disabled)
+cleanup_ttl_seconds   = 3600
+
+# Pre-job scripts (leave empty to disable)
+# Receives: ORCH_JOB_ID, ORCH_INPUT_DIR, ORCH_OUTPUT_DIR
+pre_job_script_win    =
+pre_job_script_linux  =
 ```
 
 ---
 
-## Provisioning des machines
+## Machine Provisioning
 
-Décrivez le parc de machines dans `provisioning.json` (placé à côté de l'exe) :
+### Static file
+
+Define the machine pool in `provisioning.json` next to the executable. Supports individual entries and **range-based pools**:
 
 ```json
 {
   "machines": [
-    {
-      "id":        "srv-01",
-      "hostname":  "server01.local",
-      "ip":        "192.168.1.10",
-      "enabled":   true,
-      "cores":     8,
-      "gpu_count": 1,
-      "ram_mb":    16384,
-      "disk_mb":   204800
-    },
     {
       "id":        "local",
       "hostname":  "localhost",
@@ -103,22 +111,38 @@ Décrivez le parc de machines dans `provisioning.json` (placé à côté de l'ex
       "ram_mb":    8192,
       "disk_mb":   102400
     }
+  ],
+  "pools": [
+    {
+      "id_prefix":       "server-",
+      "hostname_format": "server-%03d.example.com",
+      "ip_format":       "10.0.1.%d",
+      "range_start":     1,
+      "range_end":       128,
+      "enabled":         false,
+      "cores":           16,
+      "gpu_count":       0,
+      "ram_mb":          32768,
+      "disk_mb":         512000
+    }
   ]
 }
 ```
 
-Il est aussi possible d'ajouter/supprimer des machines à chaud via l'API (`POST /provision` / `DELETE /provision/:id`).
+### Live provisioning
+
+Machines can be added, updated, or removed at runtime via the API without restarting the daemon — see `POST /provision` and `DELETE /provision/:id`.
 
 ---
 
-## Démarrage
+## Starting the Daemon
 
 ```powershell
-# Windows — mode console (sans droits admin)
+# Windows — console mode
 .\build\bin\Debug\orchestrator.exe
 
-# Avec un fichier de config personnalisé
-.\build\bin\Debug\orchestrator.exe --conf C:\chemin\vers\orchestrator.conf
+# Custom config
+.\build\bin\Debug\orchestrator.exe --conf C:\path\to\orchestrator.conf
 ```
 
 ```bash
@@ -129,136 +153,212 @@ Il est aussi possible d'ajouter/supprimer des machines à chaud via l'API (`POST
 
 ---
 
-## Génération d'une clé API
+## Generating an API Key
 
-L'authentification utilise un header `X-API-Key`. La clé brute n'est affichée **qu'une seule fois** — seul son hash SHA-256 est stocké en base.
+The raw key is shown **only once** — only its SHA-256 hash is stored in the database.
 
 ```powershell
-.\build\bin\Debug\orchestrator.exe keygen --label "mon-application"
+.\build\bin\Debug\orchestrator.exe keygen --label "my-application"
 ```
 
-Sortie :
 ```
-API Key generated for label 'mon-application':
-a3f8c2e1d4b79f0e...  (64 caractères hex)
+API Key generated for label 'my-application':
+a3f8c2e1d4b79f0e...  (64 hex characters)
 Store this key — it will not be shown again.
 ```
 
-Options :
-
-| Paramètre | Description | Défaut |
+| Parameter | Description | Default |
 |---|---|---|
-| `--label "nom"` | Étiquette lisible associée à la clé | `default` |
-| `--conf "chemin"` | Chemin vers un fichier de config alternatif | auto-détecté |
+| `--label "name"` | Human-readable label | `default` |
+| `--conf "path"` | Alternative config file | auto-detected |
 
 ---
 
-## API REST
+## REST API
 
-Toutes les routes requièrent le header :
+All routes require:
 ```
-X-API-Key: <votre-clé>
+X-API-Key: <your-key>
 ```
 
 ### Jobs
 
-#### Soumettre un job
+#### Submit a job
 ```http
 POST /jobs
 Content-Type: application/json
-
-{
-  "command":    "python3 /scripts/train.py",
-  "priority":   1,
-  "req_cores":  2,
-  "req_gpu":    0,
-  "req_ram_mb": 2048,
-  "req_disk_mb":10240
-}
 ```
 
-| Champ | Type | Obligatoire | Description |
+| Field | Type | Required | Description |
 |---|---|---|---|
-| `command` | string | ✅ | Commande à exécuter |
-| `priority` | int | — | Priorité (0 = plus haute). Défaut : `0` |
-| `req_cores` | int | — | Cœurs CPU requis. Défaut : `1` |
-| `req_gpu` | int | — | GPU requis. Défaut : `0` |
-| `req_ram_mb` | int | — | RAM en Mo. Défaut : `0` |
-| `req_disk_mb` | int | — | Disque en Mo. Défaut : `0` |
+| `command` | string | ✅ | Command to execute |
+| `priority` | int | — | Priority (lower = higher priority). Default: `50` |
+| `req_cores` | int | — | CPU cores required. Default: `1` |
+| `req_gpu` | int | — | GPUs required. Default: `0` |
+| `req_ram_mb` | int | — | RAM in MB. Default: `0` |
+| `req_disk_mb` | int | — | Disk in MB. Default: `0` |
 
-Réponse `201` :
+Response `201`:
 ```json
 {
-  "id": "550e8400-e29b-41d4-a716-446655440000",
-  "command": "python3 /scripts/train.py",
-  "status": "IN_QUEUE",
-  "priority": 1,
-  "req_cores": 2,
-  "req_gpu": 0,
-  "req_ram_mb": 2048,
-  "req_disk_mb": 10240,
-  "machine_id": "",
+  "id":           "550e8400-e29b-41d4-a716-446655440000",
+  "command":      "python3 train.py",
+  "status":       "IN_QUEUE",
+  "priority":     50,
+  "req_cores":    2,
+  "req_gpu":      0,
+  "req_ram_mb":   2048,
+  "req_disk_mb":  10240,
+  "machine_id":   "",
   "submitted_at": 1740744229,
-  "started_at": 0,
-  "ended_at": 0,
-  "exit_code": 0
+  "started_at":   0,
+  "ended_at":     0,
+  "exit_code":    0
 }
 ```
+
+Job states: `IN_QUEUE` → `STARTING` → `RUNNING` → `FINISHED` / `FAILED` / `CANCELLED`
 
 ---
 
-#### Lister les jobs
+#### List all jobs
 ```http
 GET /jobs
 ```
+Returns a JSON array of all job objects.
 
 ---
 
-#### Consulter un job
+#### Get a job
 ```http
 GET /jobs/:id
 ```
 
-États possibles : `IN_QUEUE` → `STARTING` → `RUNNING` → `FINISHED` / `FAILED` / `CANCELLED`
+---
+
+#### Cancel a job
+```http
+DELETE /jobs/:id
+```
+Returns the updated job object. Returns `409` if the job is already in a terminal state.
 
 ---
 
-#### Annuler un job
+#### Purge terminal jobs
 ```http
-DELETE /jobs/:id
+DELETE /jobs
+```
+Deletes all `FINISHED`, `FAILED`, and `CANCELLED` jobs from the database and removes their work directories.
+
+Response:
+```json
+{ "deleted": 12, "cleaned": 10 }
 ```
 
 ---
 
-#### Uploader un fichier d'entrée
+#### Upload an input file
 ```http
 POST /jobs/:id/input/:filename
 Content-Type: application/octet-stream
 
-<contenu binaire>
+<binary content>
 ```
+Files are stored in the job's input directory and injected as `ORCH_INPUT_DIR` into the pre-job script and job command.
 
 ---
 
-#### Télécharger un fichier de sortie
+#### Download an output file
 ```http
 GET /jobs/:id/output/:filename
 ```
 
 ---
 
-### Ressources
+#### Get stdout log
+```http
+GET /jobs/:id/log
+```
 
-#### Lister les machines
+#### Get stderr log
+```http
+GET /jobs/:id/log/stderr
+```
+
+Both return `text/plain`. Returns `404` if the log file does not exist yet.
+
+---
+
+#### Subscribe to real-time events (SSE)
+```http
+GET /jobs/events
+```
+Opens a persistent `text/event-stream` connection.
+
+- **`snapshot`** event — sent immediately on connect; contains the current state of all jobs as a JSON array.
+- **`job_status`** event — sent every time a job changes state:
+  ```
+  event: job_status
+  data: {"event":"job_status","id":"<id>","status":"RUNNING","machine_id":"srv-01"}
+  ```
+
+---
+
+### Resources
+
+#### List machines
 ```http
 GET /resources
 ```
 
+Response — array of machine objects:
+```json
+[
+  {
+    "id":               "srv-01",
+    "hostname":         "server01.local",
+    "ip":               "192.168.1.10",
+    "enabled":          true,
+    "cores_total":      16,
+    "cores_reserved":   4,
+    "gpu_total":        2,
+    "gpu_reserved":     0,
+    "ram_mb_total":     32768,
+    "ram_mb_reserved":  4096,
+    "disk_mb_total":    512000,
+    "disk_mb_reserved": 10240
+  }
+]
+```
+
 ---
 
-### Provisioning (à chaud)
+### Stats
 
-#### Ajouter / mettre à jour une machine
+#### Cluster statistics
+```http
+GET /stats
+```
+
+```json
+{
+  "jobs": {
+    "total": 42, "in_queue": 3, "starting": 1,
+    "running": 5, "finished": 30, "failed": 2, "cancelled": 1
+  },
+  "machines": { "total": 8, "enabled": 8 },
+  "resources": {
+    "cores_total": 128, "cores_used": 24,
+    "ram_mb_total": 262144, "ram_mb_used": 20480
+  }
+}
+```
+
+---
+
+### Live Provisioning
+
+#### Add or update a machine
 ```http
 POST /provision
 Content-Type: application/json
@@ -275,72 +375,108 @@ Content-Type: application/json
 }
 ```
 
-#### Supprimer une machine
+#### Remove a machine
 ```http
 DELETE /provision/:id
 ```
 
 ---
 
-## Exemples PowerShell
+## PowerShell Examples
 
 ```powershell
-$key = "votre-clé-api-ici"
-$base = "http://localhost:8080"
+$key     = "your-api-key-here"
+$base    = "http://localhost:8080"
 $headers = @{ "X-API-Key" = $key; "Content-Type" = "application/json" }
 
-# Soumettre un job
+# Submit a job
 $body = '{"command":"echo hello","req_cores":1,"req_ram_mb":512}'
 Invoke-RestMethod -Uri "$base/jobs" -Method POST -Headers $headers -Body $body
 
-# Lister les jobs
+# List all jobs
 Invoke-RestMethod -Uri "$base/jobs" -Method GET -Headers $headers
 
-# Consulter un job spécifique
+# Get a specific job
 Invoke-RestMethod -Uri "$base/jobs/<id>" -Method GET -Headers $headers
 
-# Annuler un job
+# Cancel a job
 Invoke-RestMethod -Uri "$base/jobs/<id>" -Method DELETE -Headers $headers
 
-# Uploader un fichier d'entrée
+# Purge all terminal jobs
+Invoke-RestMethod -Uri "$base/jobs" -Method DELETE -Headers $headers
+
+# Upload an input file
 Invoke-RestMethod -Uri "$base/jobs/<id>/input/data.csv" -Method POST `
-    -Headers @{ "X-API-Key" = $key } `
-    -ContentType "application/octet-stream" `
+    -Headers @{ "X-API-Key" = $key } -ContentType "application/octet-stream" `
     -InFile "C:\data\data.csv"
 
-# Télécharger un fichier de sortie
+# Download an output file
 Invoke-RestMethod -Uri "$base/jobs/<id>/output/result.json" -Method GET `
-    -Headers @{ "X-API-Key" = $key } `
-    -OutFile "C:\data\result.json"
+    -Headers @{ "X-API-Key" = $key } -OutFile "C:\data\result.json"
 
-# Lister les machines
+# Get stdout log
+Invoke-RestMethod -Uri "$base/jobs/<id>/log" -Method GET -Headers $headers
+
+# Get stderr log
+Invoke-RestMethod -Uri "$base/jobs/<id>/log/stderr" -Method GET -Headers $headers
+
+# Cluster stats
+Invoke-RestMethod -Uri "$base/stats" -Method GET -Headers $headers
+
+# List machines with utilisation
 Invoke-RestMethod -Uri "$base/resources" -Method GET -Headers $headers
+
+# Add a machine at runtime
+$m = '{"id":"srv-03","hostname":"srv03.local","ip":"10.0.0.3","cores":32,"ram_mb":65536,"disk_mb":1048576}'
+Invoke-RestMethod -Uri "$base/provision" -Method POST -Headers $headers -Body $m
+
+# Remove a machine
+Invoke-RestMethod -Uri "$base/provision/srv-03" -Method DELETE -Headers $headers
 ```
 
 ---
 
-## Structure du projet
+## Project Structure
 
 ```
 BHC_SCHEDULER/
 ├── src/
-│   ├── main.c                  # Point d'entrée
-│   ├── core/                   # Scheduler, job state machine, queue, executor
-│   ├── http/                   # Serveur HTTP, routes, auth, réponses
-│   ├── persistence/            # SQLite, config, logs
-│   ├── resources/              # Registre de machines, allocateur
-│   ├── transfer/               # Upload / download de fichiers
-│   └── platform/               # Abstraction Windows Service / Linux daemon
-├── include/                    # En-têtes publics
-├── vendor/                     # Mongoose, SQLite, cJSON (amalgamés)
+│   ├── main.c                  # Entry point, startup, shutdown
+│   ├── core/
+│   │   ├── scheduler.c         # Dispatch loop, poll, TTL cleanup
+│   │   ├── job.c               # Job struct, state machine, SSE events
+│   │   ├── queue.c             # Priority queue
+│   │   └── executor.c          # Process launch, pre-job script, stdout/stderr capture
+│   ├── http/
+│   │   ├── httpd.c             # Mongoose event loop, SSE subscriber list
+│   │   ├── routes.c            # Route dispatcher and all handlers
+│   │   ├── auth.c              # SHA-256 API key check
+│   │   └── response.c          # JSON / error helpers
+│   ├── persistence/
+│   │   ├── db.c                # SQLite — jobs, keys, stats, purge
+│   │   ├── config.c            # INI parser
+│   │   └── log.c               # Leveled logger
+│   ├── resources/
+│   │   ├── registry.c          # Machine registry, pool expansion
+│   │   ├── allocator.c         # Single-machine and multi-machine allocation
+│   │   └── probe.c             # Resource probing
+│   ├── transfer/
+│   │   ├── store.c             # Work directory management
+│   │   ├── upload.c            # Input file write
+│   │   └── download.c          # Output file serve
+│   └── platform/
+│       ├── service_win.c       # Windows Service integration
+│       └── service_linux.c     # Linux daemon (double-fork)
+├── include/                    # Public headers
+├── vendor/                     # Mongoose, SQLite, cJSON (amalgamated)
 ├── config/
-│   ├── orchestrator.conf       # Configuration principale
-│   └── provisioning.json       # Parc de machines initial
+│   ├── orchestrator.conf       # Main configuration
+│   └── provisioning.json       # Initial machine pool
 └── CMakeLists.txt
 ```
 
 ---
 
-## Licence
+## License
 
-Voir [LICENSE](LICENSE) et [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md).
+See [LICENSE](LICENSE) and [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md).

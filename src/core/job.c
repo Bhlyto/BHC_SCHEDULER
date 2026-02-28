@@ -20,7 +20,7 @@
 #  include <fcntl.h>
 #  include <unistd.h>
    static void gen_uuid(char *out) {
-       /* Read 16 random bytes from /dev/urandom, format as UUID v4 */
+
        unsigned char b[16];
        int fd = open("/dev/urandom", O_RDONLY);
        if (fd < 0 || read(fd, b, 16) != 16) {
@@ -38,12 +38,6 @@
    }
 #endif
 
-/* Allowed state transitions:
-   IN_QUEUE  -> STARTING, CANCELLED
-   STARTING  -> RUNNING, FAILED, CANCELLED
-   RUNNING   -> FINISHED, FAILED
-   FINISHED, CANCELLED, FAILED -> (terminal, no transitions)
-*/
 static int transition_allowed(JobStatus from, JobStatus to)
 {
     switch (from) {
@@ -119,7 +113,6 @@ int job_set_status(Job *job, JobStatus new_status)
             break;
     }
 
-    /* Broadcast SSE event to all monitoring clients */
     char evt[EVENTS_JSON_MAX];
     snprintf(evt, sizeof(evt),
         "{\"event\":\"job_status\",\"id\":\"%s\",\"status\":\"%s\",\"machine_id\":\"%s\"}",

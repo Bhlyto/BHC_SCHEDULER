@@ -21,9 +21,9 @@ static pthread_mutex_t s_mu = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 static char s_buf[EVENTS_BUF_SIZE][EVENTS_JSON_MAX];
-static int  s_head  = 0;   /* next write slot */
-static int  s_tail  = 0;   /* next read slot  */
-static int  s_count = 0;   /* current number of buffered events */
+static int  s_head  = 0;
+static int  s_tail  = 0;
+static int  s_count = 0;
 
 void events_init(void)
 {
@@ -44,7 +44,6 @@ void events_push(const char *json)
     if (s_count < EVENTS_BUF_SIZE) {
         s_count++;
     } else {
-        /* Buffer full: overwrite oldest entry */
         s_tail = (s_tail + 1) % EVENTS_BUF_SIZE;
     }
     EVT_UNLOCK();

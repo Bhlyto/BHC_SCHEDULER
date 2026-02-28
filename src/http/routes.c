@@ -19,6 +19,7 @@
  * Route table:
  *   POST   /jobs                      → submit_job
  *   GET    /jobs                      → list_jobs
+ *   DELETE /jobs                      → purge_jobs  (delete all FINISHED/FAILED/CANCELLED)
  *   GET    /jobs/events               → sse_subscribe  (Server-Sent Events)
  *   GET    /jobs/:id                  → get_job
  *   DELETE /jobs/:id                  → cancel_job
@@ -36,8 +37,6 @@
 
 static void extract_segment(const char *uri, int seg_index, char *out, int out_len)
 {
-    /* URI looks like /segment0/segment1/segment2/...
-       seg_index 0 = first segment after leading '/' */
     const char *p = uri;
     while (*p == '/') p++;
     for (int i = 0; i < seg_index; i++) {
@@ -71,7 +70,6 @@ static cJSON *job_to_json(const Job *job)
 
 /* ── Handlers ────────────────────────────────────────────────────── */
 
-/* POST /jobs */
 static void submit_job(struct mg_connection *c, struct mg_http_message *hm)
 {
     char body[1024] = {0};
@@ -87,7 +85,6 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm)
     cJSON *jgpu  = cJSON_GetObjectItemCaseSensitive(req, "req_gpu");
     cJSON *jram  = cJSON_GetObjectItemCaseSensitive(req, "req_ram_mb");
     cJSON *jdisk = cJSON_GetObjectItemCaseSensitive(req, "req_disk_mb");
-    /* Also accept short names for convenience */
     if (!jcor)  jcor  = cJSON_GetObjectItemCaseSensitive(req, "cores");
     if (!jgpu)  jgpu  = cJSON_GetObjectItemCaseSensitive(req, "gpu");
     if (!jram)  jram  = cJSON_GetObjectItemCaseSensitive(req, "ram_mb");
@@ -119,7 +116,6 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm)
     cJSON_Delete(resp);
 }
 
-/* GET /jobs */
 static void list_jobs(struct mg_connection *c, struct mg_http_message *hm)
 {
     (void)hm;
@@ -136,7 +132,6 @@ static void list_jobs(struct mg_connection *c, struct mg_http_message *hm)
     cJSON_Delete(arr);
 }
 
-/* GET /jobs/:id */
 static void get_job(struct mg_connection *c, struct mg_http_message *hm,
                     const char *job_id)
 {
@@ -151,7 +146,6 @@ static void get_job(struct mg_connection *c, struct mg_http_message *hm,
     job_free(job);
 }
 
-/* DELETE /jobs/:id */
 static void cancel_job(struct mg_connection *c, struct mg_http_message *hm,
                         const char *job_id)
 {
@@ -175,7 +169,29 @@ static void cancel_job(struct mg_connection *c, struct mg_http_message *hm,
     job_free(job);
 }
 
-/* POST /jobs/:id/input/:filename */
+static void purge_jobs(struct mg_connection *c, struct mg_http_message *hm)
+{
+    (void)hm;
+    Job *jobs = (Job *)malloc(4096 * sizeof(Job));
+    if (!jobs) { http_error(c, 500, "Out of memory"); return; }
+    int count = db_list_jobs(jobs, 4096);
+    int cleaned = 0;
+    for (int i = 0; i < count; i++) {
+        if (jobs[i].status == JOB_STATUS_FINISHED ||
+            jobs[i].status == JOB_STATUS_FAILED   ||
+            jobs[i].status == JOB_STATUS_CANCELLED) {
+            store_cleanup_job(jobs[i].id);
+            cleaned++;
+        }
+    }
+    free(jobs);
+    int deleted = db_purge_jobs();
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"deleted\":%d,\"cleaned\":%d}", deleted, cleaned);
+    http_json_reply(c, 200, buf);
+    log_info("routes", "Purged %d terminal jobs (%d work dirs cleaned)", deleted, cleaned);
+}
+
 static void upload_input(struct mg_connection *c, struct mg_http_message *hm,
                           const char *job_id, const char *filename)
 {
@@ -187,7 +203,6 @@ static void upload_input(struct mg_connection *c, struct mg_http_message *hm,
     http_json_reply(c, 200, buf);
 }
 
-/* GET /jobs/:id/output/:filename */
 static void download_output(struct mg_connection *c, struct mg_http_message *hm,
                              const char *job_id, const char *filename)
 {
@@ -195,7 +210,6 @@ static void download_output(struct mg_connection *c, struct mg_http_message *hm,
         http_error(c, 404, "Output file not found");
 }
 
-/* GET /jobs/:id/log[/stderr]  — stream a captured log file */
 static void get_job_log(struct mg_connection *c, struct mg_http_message *hm,
                         const char *job_id, int use_stderr)
 {
@@ -224,7 +238,6 @@ static void get_job_log(struct mg_connection *c, struct mg_http_message *hm,
     fclose(f);
 }
 
-/* GET /jobs/events — Server-Sent Events stream */
 static void sse_subscribe(struct mg_connection *c, struct mg_http_message *hm)
 {
     (void)hm;
@@ -237,7 +250,6 @@ static void sse_subscribe(struct mg_connection *c, struct mg_http_message *hm)
         "\r\n");
     httpd_sse_add(c);
 
-    /* Send an immediate snapshot so the client starts up-to-date */
     Job jobs[256];
     int count = db_list_jobs(jobs, 256);
     cJSON *arr = cJSON_CreateArray();
@@ -248,7 +260,6 @@ static void sse_subscribe(struct mg_connection *c, struct mg_http_message *hm)
     cJSON_Delete(arr);
 }
 
-/* GET /stats */
 static void get_stats(struct mg_connection *c, struct mg_http_message *hm)
 {
     (void)hm;
@@ -294,7 +305,6 @@ static void get_stats(struct mg_connection *c, struct mg_http_message *hm)
     cJSON_Delete(root);
 }
 
-/* GET /resources */
 static void get_resources(struct mg_connection *c, struct mg_http_message *hm)
 {
     (void)hm;
@@ -323,7 +333,6 @@ static void get_resources(struct mg_connection *c, struct mg_http_message *hm)
     cJSON_Delete(arr);
 }
 
-/* POST /provision */
 static void add_machine(struct mg_connection *c, struct mg_http_message *hm)
 {
     char body[1024] = {0};
@@ -355,7 +364,6 @@ static void add_machine(struct mg_connection *c, struct mg_http_message *hm)
     http_json_reply(c, 201, "{\"ok\":true}");
 }
 
-/* DELETE /provision/:id */
 static void remove_machine(struct mg_connection *c, struct mg_http_message *hm,
                             const char *machine_id)
 {
@@ -367,13 +375,11 @@ static void remove_machine(struct mg_connection *c, struct mg_http_message *hm,
     http_json_reply(c, 200, "{\"ok\":true}");
 }
 
-/* ── Main dispatcher ─────────────────────────────────────────────── */
 void routes_handler(struct mg_connection *c, int ev, void *ev_data)
 {
     if (ev != MG_EV_HTTP_MSG) return;
     struct mg_http_message *hm = (struct mg_http_message *)ev_data;
 
-    /* Authentication — reject unauthenticated requests */
     if (!auth_check(c, hm)) {
         http_error(c, 401, "Unauthorized");
         return;
@@ -398,44 +404,40 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
         if (strcmp(method, "GET") == 0 && seg[1][0] == '\0') {
             list_jobs(c, hm); return;
         }
-        /* GET /jobs/events — must be checked before /jobs/:id */
+        /* DELETE /jobs — purge all terminal jobs */
+        if (strcmp(method, "DELETE") == 0 && seg[1][0] == '\0') {
+            purge_jobs(c, hm); return;
+        }
         if (strcmp(method, "GET") == 0 && strcmp(seg[1], "events") == 0) {
             sse_subscribe(c, hm); return;
         }
         if (seg[1][0] != '\0') {
-            /* /jobs/:id */
             if (strcmp(method, "GET") == 0 && seg[2][0] == '\0') {
                 get_job(c, hm, seg[1]); return;
             }
             if (strcmp(method, "DELETE") == 0 && seg[2][0] == '\0') {
                 cancel_job(c, hm, seg[1]); return;
             }
-            /* /jobs/:id/input/:filename */
             if (strcmp(method, "POST") == 0 && strcmp(seg[2], "input") == 0 && seg[3][0]) {
                 upload_input(c, hm, seg[1], seg[3]); return;
             }
-            /* /jobs/:id/output/:filename */
             if (strcmp(method, "GET") == 0 && strcmp(seg[2], "output") == 0 && seg[3][0]) {
                 download_output(c, hm, seg[1], seg[3]); return;
             }
-            /* /jobs/:id/log and /jobs/:id/log/stderr */
             if (strcmp(method, "GET") == 0 && strcmp(seg[2], "log") == 0) {
                 get_job_log(c, hm, seg[1], strcmp(seg[3], "stderr") == 0); return;
             }
         }
     }
 
-    /* /resources */
     if (strcmp(seg[0], "resources") == 0 && strcmp(method, "GET") == 0) {
         get_resources(c, hm); return;
     }
 
-    /* /stats */
     if (strcmp(seg[0], "stats") == 0 && strcmp(method, "GET") == 0) {
         get_stats(c, hm); return;
     }
 
-    /* /provision */
     if (strcmp(seg[0], "provision") == 0) {
         if (strcmp(method, "POST") == 0 && seg[1][0] == '\0') {
             add_machine(c, hm); return;

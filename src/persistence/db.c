@@ -6,7 +6,7 @@
 
 static sqlite3 *s_db = NULL;
 
-/* ── Schema ──────────────────────────────────────────────────────── */
+
 static const char *SCHEMA =
     "CREATE TABLE IF NOT EXISTS jobs ("
     "  id            TEXT PRIMARY KEY,"
@@ -51,7 +51,6 @@ static const char *SCHEMA =
     "  ts        INTEGER NOT NULL"
     ");";
 
-/* ── Open / Close ────────────────────────────────────────────────── */
 int db_open(const char *path)
 {
     if (sqlite3_open(path, &s_db) != SQLITE_OK) {
@@ -73,7 +72,6 @@ void db_close(void)
     if (s_db) { sqlite3_close(s_db); s_db = NULL; }
 }
 
-/* ── Jobs ────────────────────────────────────────────────────────── */
 int db_insert_job(const Job *job)
 {
     const char *sql =
@@ -186,7 +184,6 @@ int db_list_jobs(Job *jobs, int max_count)
     return count;
 }
 
-/* ── API Keys ────────────────────────────────────────────────────── */
 int db_insert_api_key(const char *key_hash, const char *label)
 {
     const char *sql =
@@ -223,7 +220,6 @@ int db_revoke_api_key(const char *key_hash)
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* ── Allocations ─────────────────────────────────────────────────── */
 int db_insert_allocation(const char *job_id, const char *machine_id,
                           int cores, int gpu, int ram_mb, int disk_mb)
 {
@@ -256,7 +252,6 @@ int db_release_allocation(const char *job_id)
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
-/* ── Audit ───────────────────────────────────────────────────────── */
 int db_audit(const char *event, const char *detail)
 {
     const char *sql =
@@ -269,7 +264,6 @@ int db_audit(const char *event, const char *detail)
     sqlite3_finalize(st);
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
-/* ── Stats ──────────────────────────────────────────── */
 int db_job_stats(JobStats *out)
 {
     memset(out, 0, sizeof(*out));
@@ -291,4 +285,15 @@ int db_job_stats(JobStats *out)
     }
     sqlite3_finalize(st);
     return 0;
+}
+
+int db_purge_jobs(void)
+{
+    const char *sql = "DELETE FROM jobs WHERE status IN (3, 4, 5);";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_step(st);
+    int deleted = sqlite3_changes(s_db);
+    sqlite3_finalize(st);
+    return deleted;
 }

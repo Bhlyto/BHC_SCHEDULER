@@ -4,11 +4,6 @@
 #include <string.h>
 #include <time.h>
 
-/*
- * log.c
- * Structured logger with configurable level.
- */
-
 typedef enum { LOG_DEBUG=0, LOG_INFO, LOG_WARN, LOG_ERROR } LogLevel;
 
 static LogLevel s_level = LOG_INFO;

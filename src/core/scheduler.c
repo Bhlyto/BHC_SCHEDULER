@@ -15,20 +15,11 @@
 #  define sleep_ms(ms) usleep((ms) * 1000)
 #endif
 
-/*
- * scheduler.c
- * Scheduler loop: polls the queue, checks resource availability,
- * reserves resources and hands jobs off to the executor.
- */
-
-/* Forward declaration from executor.c */
 int executor_spawn(Job *job);
 
 static Queue *s_queue    = NULL;
 static int    s_running  = 0;
 
-/* Called by executor.c after a job's watcher thread exits */
-/* (No extra action needed — alloc_release handles resources.) */
 
 #ifdef _WIN32
 static DWORD WINAPI scheduler_thread(LPVOID arg)
@@ -54,7 +45,6 @@ static void *scheduler_thread(void *arg)
                        : 0;
 
         if (!can_single && !can_multi) {
-            /* No resources available at all — put back and wait */
             queue_push(s_queue, job);
             log_debug("scheduler", "No resources for job %s, re-queued", job->id);
             continue;
@@ -62,7 +52,6 @@ static void *scheduler_thread(void *arg)
 
         int dispatched = 0;
         if (can_single) {
-            /* ── Single-machine path ── */
             char machine_id[64] = {0};
             if (alloc_reserve(job->id,
                               job->req_cores, job->req_gpu,
@@ -76,7 +65,6 @@ static void *scheduler_thread(void *arg)
         }
 
         if (!dispatched && can_multi) {
-            /* ── Multi-machine path ── */
             char machine_ids[1024] = {0};
             int  n_machines = 0;
             if (alloc_reserve_multi(job->id,

@@ -1,11 +1,6 @@
 #ifndef HTTP_H
 #define HTTP_H
 
-/*
- * http.h
- * Embedded HTTP server, auth, routing, and response helpers.
- */
-
 #include "mongoose.h"
 
 /* ── Server lifecycle ────────────────────────── */

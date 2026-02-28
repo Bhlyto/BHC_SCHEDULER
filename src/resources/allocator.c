@@ -18,8 +18,6 @@
    static void lock_release(void){ pthread_mutex_unlock(&s_lock); }
 #endif
 
-/* Per-allocation tracking so we can release resources when a job ends.
- * A job can span up to ALLOC_MAX_MACHINES_PER_JOB machines. */
 typedef struct {
     char machine_id[64];
     int  cores; int gpu; int ram_mb; int disk_mb;
@@ -122,7 +120,6 @@ int alloc_reserve_multi(const char *job_id,
     }
     if (remaining > 0) { lock_release(); return -1; }
 
-    /* RAM/disk split equally across selected machines */
     int ram_per  = (req_ram_mb  + n_slots - 1) / n_slots;
     int disk_per = (req_disk_mb + n_slots - 1) / n_slots;
     for (int i = 0; i < n_slots; i++) {
@@ -133,7 +130,6 @@ int alloc_reserve_multi(const char *job_id,
         }
     }
 
-    /* Commit reservations */
     out_machine_ids[0] = '\0';
     AllocRecord *r = NULL;
     if (s_alloc_count < MAX_ALLOC) {
@@ -206,7 +202,6 @@ int alloc_reserve(const char *job_id,
     strncpy(out_machine_id, chosen->id, 63);
     out_machine_id[63] = '\0';
 
-    /* Track in memory */
     if (s_alloc_count < MAX_ALLOC) {
         AllocRecord *r = &s_allocs[s_alloc_count++];
         memset(r, 0, sizeof(*r));
@@ -235,7 +230,6 @@ int alloc_release(const char *job_id)
     for (int i = 0; i < s_alloc_count; i++) {
         AllocRecord *r = &s_allocs[i];
         if (!r->active || strcmp(r->job_id, job_id) != 0) continue;
-        /* Release resources on every slot (multi-machine support) */
         for (int s = 0; s < r->n_slots; s++) {
             Machine *M = registry_get(r->slots[s].machine_id);
             if (M) {

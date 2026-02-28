@@ -13,8 +13,6 @@
 #  include <wincrypt.h>
 #  define sleep_ms(ms) Sleep(ms)
 
-/* Resolve a path relative to the directory that contains the executable.
-   Falls back to 'rel' as-is if GetModuleFileNameA fails. */
 static void exe_relative_path(const char *rel, char *out, size_t out_sz)
 {
     char exe[MAX_PATH] = {0};
@@ -24,8 +22,6 @@ static void exe_relative_path(const char *rel, char *out, size_t out_sz)
     else      { strncpy(out, rel, out_sz - 1); }
 }
 
-/* For each relative path in g_config, resolve it from the exe directory.
-   Absolute paths (contain ':' on Windows) are left untouched. */
 static void resolve_config_paths(void)
 {
     char tmp[MAX_PATH];
@@ -44,41 +40,26 @@ static void resolve_config_paths(void)
 #  define sleep_ms(ms) usleep((ms) * 1000)
 #endif
 
-/*
- * main.c
- * Entry point. Loads config, initialises all subsystems, then hands off
- * to the platform service wrapper which blocks until a stop is requested.
- */
-
-/* ── orchestrator_run ────────────────────────────────────────────────
-   Called by the platform layer after the service/daemon is registered.
-   Starts HTTP + scheduler threads, then sleeps in a tight loop until
-   platform_stop_requested() returns 1.
- */
 void orchestrator_run(void)
 {
     log_info("main", "Orchestrator starting up");
 
-    /* 1. Open database */
     if (db_open(g_config.db_path) != 0) {
         log_error("main", "Failed to open database at %s", g_config.db_path);
         return;
     }
     log_info("main", "Database opened: %s", g_config.db_path);
 
-    /* 2. Load provisioning (non-fatal: can be populated via /provision API) */
     int machine_count = registry_load(g_config.provisioning_json);
     if (machine_count < 0)
         log_warn("main", "No provisioning.json loaded (%s) — add machines via POST /provision", g_config.provisioning_json);
     else
         log_info("main", "%d machine(s) loaded from %s", machine_count, g_config.provisioning_json);
 
-    /* 3. Start scheduler */
     scheduler_init();
     scheduler_start();
     log_info("main", "Scheduler started");
 
-    /* 4. Start HTTP server */
     if (httpd_start(g_config.listen_port) != 0) {
         log_error("main", "Failed to start HTTP server on port %d", g_config.listen_port);
         scheduler_stop();
@@ -88,11 +69,9 @@ void orchestrator_run(void)
     log_info("main", "HTTP API listening on port %d", g_config.listen_port);
     log_info("main", "Ready. Send jobs to POST http://localhost:%d/jobs", g_config.listen_port);
 
-    /* 5. Main loop — block until a stop is requested */
     while (!platform_stop_requested())
         sleep_ms(250);
 
-    /* 6. Graceful shutdown */
     log_info("main", "Shutting down …");
     httpd_stop();
     scheduler_stop();
@@ -100,12 +79,9 @@ void orchestrator_run(void)
     log_info("main", "Shutdown complete");
 }
 
-/* ── main ────────────────────────────────────────────────────────── */
 int main(int argc, char **argv)
 {
-    /* Handle keygen sub-command before starting the service */
     if (argc >= 2 && strcmp(argv[1], "keygen") == 0) {
-        /* Usage: orchestrator keygen --label "my-app" [--conf path] */
         const char *label  = "default";
 #ifdef _WIN32
         char _conf_buf[MAX_PATH]; exe_relative_path("config\\orchestrator.conf", _conf_buf, sizeof(_conf_buf));
@@ -129,7 +105,6 @@ int main(int argc, char **argv)
             return 1;
         }
 
-        /* Generate a random 32-byte key, hex-encode as the raw API key */
         unsigned char raw[32];
 #ifdef _WIN32
         HCRYPTPROV hprov;
@@ -146,7 +121,6 @@ int main(int argc, char **argv)
         char raw_hex[65] = {0};
         for (int i = 0; i < 32; i++) sprintf(raw_hex + i*2, "%02x", raw[i]);
 
-        /* Hash it for storage */
         extern void auth_hash_key(const char *raw_key, char *out_hex_65);
         char hash[65];
         auth_hash_key(raw_hex, hash);
@@ -161,7 +135,6 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* Default: start the service/daemon */
 #ifdef _WIN32
     char _conf_buf2[MAX_PATH]; exe_relative_path("config\\orchestrator.conf", _conf_buf2, sizeof(_conf_buf2));
     const char *conf = _conf_buf2;

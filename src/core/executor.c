@@ -9,13 +9,6 @@
 #include <string.h>
 #include <time.h>
 
-/*
- * executor.c
- * Spawn a child process for a job, inject env vars, and monitor its exit.
- * Calls job_set_status(RUNNING / FINISHED / FAILED) and alloc_release().
- */
-
-/* ── Platform-specific process spawning ─────────────────────────── */
 
 #ifdef _WIN32
 #include <windows.h>
@@ -46,17 +39,12 @@ static DWORD WINAPI watcher_thread(LPVOID arg)
 
 static int spawn_process(Job *job)
 {
-    /* Build env block: inherit parent environment + 3 custom vars.
-       GetEnvironmentStrings() returns a doubly-null-terminated block of
-       "KEY=VALUE\0KEY=VALUE\0\0". We copy it, then append our vars. */
     LPCH parent_env = GetEnvironmentStrings();
-    /* Measure parent block size */
     size_t parent_sz = 0;
     if (parent_env) {
         const char *p = parent_env;
         while (*p) { size_t l = strlen(p) + 1; parent_sz += l; p += l; }
     }
-    /* 5 extra vars + generous padding */
     char n_machines_str[8];
     _snprintf(n_machines_str, sizeof(n_machines_str), "%d", job->n_machines);
     size_t extra_sz = strlen("ORCH_JOB_ID=")       + strlen(job->id)            + 1
@@ -87,7 +75,6 @@ static int spawn_process(Job *job)
     /* double-null terminate */
     env_block[env_pos++] = '\0';
 
-    /* Open log files for stdout and stderr */
     char stdout_path[512], stderr_path[512];
     store_stdout_path(job->id, stdout_path, sizeof(stdout_path));
     store_stderr_path(job->id, stderr_path, sizeof(stderr_path));
@@ -107,7 +94,6 @@ static int spawn_process(Job *job)
     si.hStdOutput = (hStdout != INVALID_HANDLE_VALUE) ? hStdout : GetStdHandle(STD_OUTPUT_HANDLE);
     si.hStdError  = (hStderr != INVALID_HANDLE_VALUE) ? hStderr : GetStdHandle(STD_ERROR_HANDLE);
 
-    /* Pre-job script (Windows) */
     if (g_config.pre_job_script_win[0]) {
         char pre_cmd[512 + 10];
         _snprintf(pre_cmd, sizeof(pre_cmd), "cmd /c %s", g_config.pre_job_script_win);
@@ -138,8 +124,6 @@ static int spawn_process(Job *job)
         }
     }
 
-    /* Always run via cmd /c so that built-in commands (echo, dir, set…)
-       and shell features (pipes, redirections) work correctly. */
     char wrapped[JOB_CMD_LEN + 10];
     _snprintf(wrapped, sizeof(wrapped), "cmd /c %s", job->command);
 
@@ -214,7 +198,6 @@ static int spawn_process(Job *job)
         return -1;
     }
     if (pid == 0) {
-        /* Child: redirect stdout and stderr to log files */
         char stdout_path[512], stderr_path[512];
         store_stdout_path(job->id, stdout_path, sizeof(stdout_path));
         store_stderr_path(job->id, stderr_path, sizeof(stderr_path));
@@ -226,11 +209,9 @@ static int spawn_process(Job *job)
         setenv("ORCH_INPUT_DIR",    job->input_dir,  1);
         setenv("ORCH_OUTPUT_DIR",   job->output_dir, 1);
         setenv("ORCH_MACHINE_IDS",  job->machine_id, 1);
-        /* n_machines as string */
         char _nm[8]; snprintf(_nm, sizeof(_nm), "%d", job->n_machines);
         setenv("ORCH_MACHINE_COUNT", _nm, 1);
 
-        /* Pre-job script (Linux): run synchronously in child before exec */
         if (g_config.pre_job_script_linux[0]) {
             int pre_ret = system(g_config.pre_job_script_linux);
             if (pre_ret != 0) {
@@ -247,7 +228,6 @@ static int spawn_process(Job *job)
 
     wordfree(&we);
 
-    /* Parent: start watcher thread */
     WatchArg *wa = (WatchArg *)malloc(sizeof(WatchArg));
     wa->job = job;
     wa->pid = pid;
@@ -262,7 +242,6 @@ static int spawn_process(Job *job)
 /* ── Public API ──────────────────────────────────────────────────── */
 int executor_spawn(Job *job)
 {
-    /* Ensure I/O directories exist */
     store_init_job_dirs(job->id);
     store_input_dir (job->id, job->input_dir,  sizeof(job->input_dir));
     store_output_dir(job->id, job->output_dir, sizeof(job->output_dir));

@@ -5,16 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/*
- * auth.c
- * Validates X-API-Key header using SHA-256 hashing compared against
- * the api_keys table in SQLite.
- *
- * SHA-256 implementation: uses a minimal public-domain implementation
- * embedded below to avoid external dependencies.
- */
-
-/* ── Minimal SHA-256 (public domain by Brad Conte) ──────────────── */
+/* SHA-256 (public domain, Brad Conte) */
 #include <stdint.h>
 #define SHA256_BLOCK_SIZE 32
 
@@ -98,7 +89,6 @@ static void sha256_final(SHA256_CTX *ctx,uint8_t hash[]){
     }
 }
 
-/* Hash a string → hex string (65 bytes including null). */
 static void sha256_hex(const char *input, char *out_hex)
 {
     SHA256_CTX ctx;
@@ -134,7 +124,6 @@ int auth_check(struct mg_connection *c, struct mg_http_message *hm)
     return valid;
 }
 
-/* For CLI key generation: hash a raw key string. */
 void auth_hash_key(const char *raw_key, char *out_hex_65)
 {
     sha256_hex(raw_key, out_hex_65);

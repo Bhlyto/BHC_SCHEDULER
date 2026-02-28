@@ -9,12 +9,6 @@
 #include <fcntl.h>
 #include <string.h>
 
-/*
- * service_linux.c
- * Daemonises the process (fork + setsid) and handles SIGTERM / SIGHUP.
- */
-
-/* Forward declaration: implemented in main.c */
 void orchestrator_run(void);
 
 static volatile int s_stop_requested = 0;
@@ -40,11 +34,11 @@ static void daemonise(void)
 {
     pid_t pid = fork();
     if (pid < 0) { perror("fork"); exit(1); }
-    if (pid > 0) exit(0);           /* parent exits */
+    if (pid > 0) exit(0);  /* parent exits */
 
     if (setsid() < 0) { perror("setsid"); exit(1); }
 
-    /* Second fork to prevent the daemon from acquiring a controlling terminal */
+    /* second fork prevents reacquiring a terminal */
     pid = fork();
     if (pid < 0) exit(1);
     if (pid > 0) exit(0);
@@ -52,12 +46,10 @@ static void daemonise(void)
     umask(0);
     chdir("/");
 
-    /* Redirect stdio to /dev/null */
     int devnull = open("/dev/null", O_RDWR);
     if (devnull >= 0) {
         dup2(devnull, STDIN_FILENO);
         dup2(devnull, STDOUT_FILENO);
-        /* Keep stderr for logging */
         if (devnull > STDERR_FILENO) close(devnull);
     }
 }
@@ -81,7 +73,7 @@ void platform_service_start(int argc, char **argv)
     sa.sa_handler = sig_handler;
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT,  &sa, NULL);
-    signal(SIGHUP, SIG_IGN);   /* ignore hangup */
+    signal(SIGHUP, SIG_IGN);
 
     log_info("platform", "Process started (pid=%d)", getpid());
     orchestrator_run();

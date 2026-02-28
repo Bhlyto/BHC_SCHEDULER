@@ -5,12 +5,6 @@
 #include <string.h>
 #include <stdlib.h>
 
-/*
- * registry.c
- * Loads machine definitions from provisioning.json and provides
- * a simple in-memory registry.
- */
-
 static Machine s_machines[MAX_MACHINES];
 static int     s_count = 0;
 
@@ -92,7 +86,6 @@ int registry_load(const char *json_path)
             const char *hostname_fmt = cJSON_IsString(j_hfmt) ? j_hfmt->valuestring : NULL;
             const char *ip_fmt       = cJSON_IsString(j_ifmt) ? j_ifmt->valuestring : NULL;
 
-            /* Resources shared by all machines in the pool */
             int pool_cores = 0, pool_gpu = 0, pool_ram = 0, pool_disk = 0, pool_enabled = 1;
 #define POOL_INT(var, key) do { \
     cJSON *_j = cJSON_GetObjectItemCaseSensitive(p, key); \
@@ -107,7 +100,6 @@ int registry_load(const char *json_path)
             else if (cJSON_IsNumber(en)) pool_enabled = (int)en->valuedouble;
 #undef POOL_INT
 
-            /* Compute zero-padding width from range_end */
             int width = 1, tmp = range_end;
             while (tmp >= 10) { width++; tmp /= 10; }
 
@@ -115,16 +107,13 @@ int registry_load(const char *json_path)
                 Machine *M = &s_machines[s_count];
                 memset(M, 0, sizeof(*M));
 
-                /* id = prefix + zero-padded number */
                 snprintf(M->id,       sizeof(M->id),       "%s%0*d", prefix, width, i);
 
-                /* hostname */
                 if (hostname_fmt)
                     snprintf(M->hostname, sizeof(M->hostname), hostname_fmt, i);
                 else
                     snprintf(M->hostname, sizeof(M->hostname), "%s%0*d", prefix, width, i);
 
-                /* ip (optional) */
                 if (ip_fmt)
                     snprintf(M->ip, sizeof(M->ip), ip_fmt, i);
 

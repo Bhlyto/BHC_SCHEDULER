@@ -262,6 +262,25 @@ HIGH_ID=$(echo "$r" | grep -oE '"id":"[^"]+"' | head -1 | cut -d'"' -f4)
 r=$(wait_job "$HIGH_ID" 15)
 check 'Job haute priorité → FINISHED'       'FINISHED' "$r"
 
+# ╔══════════════════════════════════════════╗
+# ║  14. PURGE                               ║
+# ╚══════════════════════════════════════════╝
+echo -e "\n${CYA}══ 14. Purge${RST}"
+
+# Submit a quick job and wait for completion
+r=$(req POST '/jobs' '{"command":"echo purge_test","priority":1,"cores":1,"ram_mb":64}')
+PURGE_JID=$(echo "$r" | grep -oE '"id":"[^"]+"' | head -1 | cut -d'"' -f4)
+wait_job "$PURGE_JID" 15 > /dev/null
+
+# Purge all terminal jobs
+r=$(req DELETE '/jobs')
+check 'DELETE /jobs → deleted field'   '"deleted":[0-9]' "$r"
+check 'DELETE /jobs → cleaned field'   '"cleaned":[0-9]' "$r"
+
+# Confirm purged job is gone
+r=$(req GET "/jobs/$PURGE_JID")
+check 'Job purgé → absent (404)'       '404\|not.found\|error' "$r"
+
 # ══════════════════════════════════════════
 #  RÉSULTAT FINAL
 # ══════════════════════════════════════════

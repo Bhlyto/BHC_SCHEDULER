@@ -3,11 +3,6 @@
 #include <string.h>
 #include <stdlib.h>
 
-/*
- * config.c
- * Parses key=value config file and populates g_config.
- */
-
 Config g_config;
 
 void config_defaults(void)
@@ -30,7 +25,6 @@ void config_defaults(void)
 
 static void trim(char *s)
 {
-    /* Remove leading/trailing whitespace in-place */
     char *start = s;
     while (*start == ' ' || *start == '\t') start++;
     if (start != s) memmove(s, start, strlen(start) + 1);
@@ -50,7 +44,6 @@ int config_load(const char *path)
 
     char line[512];
     while (fgets(line, sizeof(line), f)) {
-        /* Strip comments */
         char *hash = strchr(line, '#');
         if (hash) *hash = '\0';
         trim(line);

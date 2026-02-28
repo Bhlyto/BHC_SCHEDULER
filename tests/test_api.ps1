@@ -305,6 +305,25 @@ $r = WaitJob $high.id 15
 Check "Job haute priorite -> FINISHED"    "FINISHED" $r.status
 
 # =============================================
+#  14. PURGE
+# =============================================
+Write-Host "`n-- 14. Purge" -ForegroundColor Cyan
+
+# Submit a quick job and wait for it to finish
+$pj = Req POST "/jobs" '{"command":"echo purge_test","priority":1,"cores":1,"ram_mb":64}'
+Check "Purge: job soumis"          "IN_QUEUE|STARTING|FINISHED" $pj.status
+[void](WaitJob $pj.id 15)
+
+# Purge all terminal jobs
+$r = Req DELETE "/jobs"
+Check "DELETE /jobs -> 200 + deleted" "[0-9]+" "$($r.deleted)"
+Check "DELETE /jobs -> cleaned field"  "[0-9]+" "$($r.cleaned)"
+
+# Confirm purged job is gone
+$gone = Req GET "/jobs/$($pj.id)"
+Check "Job purge -> absent (404)" "404|not.found|error" ($gone | ConvertTo-Json -Depth 5)
+
+# =============================================
 #  RESULTAT FINAL
 # =============================================
 Write-Host ""

@@ -1,26 +1,19 @@
 #ifndef RESOURCES_H
 #define RESOURCES_H
 
-/*
- * resources.h
- * Machine registry and resource allocator.
- */
-
 #define MAX_MACHINES 1024
 
 typedef struct {
     char id[64];
     char hostname[256];
-    char ip[46];         /* IPv4 or IPv6 */
+    char ip[46];
     int  enabled;
 
-    /* Total pool */
     int  cores_total;
     int  gpu_count_total;
     int  ram_mb_total;
     int  disk_mb_total;
 
-    /* Currently reserved */
     int  cores_reserved;
     int  gpu_count_reserved;
     int  ram_mb_reserved;

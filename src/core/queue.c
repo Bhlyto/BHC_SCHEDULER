@@ -27,12 +27,6 @@ typedef pthread_cond_t  cond_t;
 #  define cond_broadcast(c) pthread_cond_broadcast(c)
 #endif
 
-/*
- * queue.c
- * Min-heap priority queue (lower priority number = dequeued first).
- * Fully thread-safe.
- */
-
 struct Queue {
     Job    **heap;
     int      size;

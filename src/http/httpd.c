@@ -6,16 +6,10 @@
 #include <stdio.h>
 #include <string.h>
 
-/*
- * httpd.c
- * Starts the Mongoose HTTP server in a background thread.
- * Also manages SSE subscriber connections and broadcasts job events.
- */
-
 static struct mg_mgr s_mgr;
 static int           s_running = 0;
 
-/* ── SSE subscriber list ─────────────────────────────────── */
+
 #define SSE_MAX_CONNS 32
 static struct mg_connection *s_sse[SSE_MAX_CONNS];
 static int s_sse_count = 0;
@@ -30,7 +24,7 @@ static void sse_broadcast(const char *json)
 {
     for (int i = 0; i < s_sse_count; ) {
         if (s_sse[i]->is_closing || s_sse[i]->is_draining) {
-            s_sse[i] = s_sse[--s_sse_count];  /* compact the list */
+            s_sse[i] = s_sse[--s_sse_count];
         } else {
             mg_printf(s_sse[i], "data: %s\n\n", json);
             i++;
@@ -79,12 +73,12 @@ static void *http_thread(void *arg)
     while (s_running) {
         mg_mgr_poll(&s_mgr, 100);
 
-        /* Drain and broadcast any job status events queued by other threads */
+        /* Drain pending SSE events */
         char evts[EVENTS_BUF_SIZE][EVENTS_JSON_MAX];
         int n = events_drain(evts, EVENTS_BUF_SIZE);
         for (int i = 0; i < n; i++) sse_broadcast(evts[i]);
 
-        /* Send a SSE keepalive comment every 15 s (survives proxies/firewalls) */
+        /* Keepalive every 15s */
         if (mg_millis() - hb_ts > 15000) { sse_heartbeat(); hb_ts = mg_millis(); }
     }
 
@@ -99,7 +93,7 @@ static void *http_thread(void *arg)
 
 int httpd_start(int port)
 {
-    (void)port; /* uses g_config.listen_port */
+    (void)port;
     s_running = 1;
 #ifdef _WIN32
     HANDLE th = CreateThread(NULL, 0, http_thread, NULL, 0, NULL);

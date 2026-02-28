@@ -17,13 +17,6 @@
 #  define SEP "/"
 #endif
 
-/*
- * store.c
- * Manage the filesystem workspace for each job:
- *   <work_dir>/<job_id>/input/
- *   <work_dir>/<job_id>/output/
- */
-
 static void make_dir(const char *path)
 {
     /* Create each component of path if missing */
@@ -34,7 +27,7 @@ static void make_dir(const char *path)
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/' || *p == '\\') {
             *p = '\0';
-            MKDIR(tmp);  /* ignore errors — dir may already exist */
+            MKDIR(tmp);
             *p = SEP[0];
         }
     }
@@ -72,7 +65,6 @@ int store_init_job_dirs(const char *job_id)
     return 0;
 }
 
-/* Recursively delete a directory tree (portable simple version) */
 #ifdef _WIN32
 static void rmdir_r(const char *path)
 {

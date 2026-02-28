@@ -8,5 +8,4 @@ Commercial licensing options (example):
 - Company-wide license
 - License + Support (SLA, priority support)
 
-Contact: <email>
-Website: <URL>
+Contact: batoun38@gmail.com
