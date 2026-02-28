@@ -44,3 +44,5 @@ CppProperties.json
 *.log
 *.tmp
 *.bak
+orchestrator.db-shm
+orchestrator.db-wal
