@@ -32,8 +32,9 @@ typedef struct {
     int        req_ram_mb;
     int        req_disk_mb;
 
-    /* Assigned machine */
-    char       machine_id[64];
+    /* Assigned machine(s): comma-separated list for multi-machine jobs */
+    char       machine_id[1024];
+    int        n_machines;       /* 1 = single-machine, >1 = multi-machine */
 
     /* File transfer paths (set by transfer layer before executor launch) */
     char       input_dir[512];

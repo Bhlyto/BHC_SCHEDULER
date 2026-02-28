@@ -3,6 +3,7 @@
 #include "transfer.h"
 #include "db.h"
 #include "log.h"
+#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,10 +56,14 @@ static int spawn_process(Job *job)
         const char *p = parent_env;
         while (*p) { size_t l = strlen(p) + 1; parent_sz += l; p += l; }
     }
-    /* 3 extra vars + generous padding */
-    size_t extra_sz = strlen("ORCH_JOB_ID=") + strlen(job->id) + 1
-                    + strlen("ORCH_INPUT_DIR=") + strlen(job->input_dir) + 1
-                    + strlen("ORCH_OUTPUT_DIR=") + strlen(job->output_dir) + 1
+    /* 5 extra vars + generous padding */
+    char n_machines_str[8];
+    _snprintf(n_machines_str, sizeof(n_machines_str), "%d", job->n_machines);
+    size_t extra_sz = strlen("ORCH_JOB_ID=")       + strlen(job->id)            + 1
+                    + strlen("ORCH_INPUT_DIR=")    + strlen(job->input_dir)     + 1
+                    + strlen("ORCH_OUTPUT_DIR=")   + strlen(job->output_dir)    + 1
+                    + strlen("ORCH_MACHINE_IDS=")  + strlen(job->machine_id)    + 1
+                    + strlen("ORCH_MACHINE_COUNT=")+ strlen(n_machines_str)     + 1
                     + 2;  /* final double-null */
     char *env_block = (char *)malloc(parent_sz + extra_sz);
     int   env_pos   = 0;
@@ -74,9 +79,11 @@ static int spawn_process(Job *job)
     if (n > 0) env_pos += n + 1; \
 } while(0)
 
-    ADD_ENV("ORCH_JOB_ID",     job->id);
-    ADD_ENV("ORCH_INPUT_DIR",  job->input_dir);
-    ADD_ENV("ORCH_OUTPUT_DIR", job->output_dir);
+    ADD_ENV("ORCH_JOB_ID",       job->id);
+    ADD_ENV("ORCH_INPUT_DIR",    job->input_dir);
+    ADD_ENV("ORCH_OUTPUT_DIR",   job->output_dir);
+    ADD_ENV("ORCH_MACHINE_IDS",  job->machine_id);
+    ADD_ENV("ORCH_MACHINE_COUNT",n_machines_str);
     /* double-null terminate */
     env_block[env_pos++] = '\0';
 
@@ -99,6 +106,37 @@ static int spawn_process(Job *job)
     si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
     si.hStdOutput = (hStdout != INVALID_HANDLE_VALUE) ? hStdout : GetStdHandle(STD_OUTPUT_HANDLE);
     si.hStdError  = (hStderr != INVALID_HANDLE_VALUE) ? hStderr : GetStdHandle(STD_ERROR_HANDLE);
+
+    /* Pre-job script (Windows) */
+    if (g_config.pre_job_script_win[0]) {
+        char pre_cmd[512 + 10];
+        _snprintf(pre_cmd, sizeof(pre_cmd), "cmd /c %s", g_config.pre_job_script_win);
+        PROCESS_INFORMATION pre_pi; STARTUPINFOA pre_si;
+        ZeroMemory(&pre_si, sizeof(pre_si)); pre_si.cb = sizeof(pre_si);
+        ZeroMemory(&pre_pi, sizeof(pre_pi));
+        pre_si.dwFlags    = STARTF_USESTDHANDLES;
+        pre_si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+        pre_si.hStdOutput = (hStdout != INVALID_HANDLE_VALUE) ? hStdout : GetStdHandle(STD_OUTPUT_HANDLE);
+        pre_si.hStdError  = (hStderr != INVALID_HANDLE_VALUE) ? hStderr : GetStdHandle(STD_ERROR_HANDLE);
+        if (CreateProcessA(NULL, pre_cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                           env_block, NULL, &pre_si, &pre_pi)) {
+            WaitForSingleObject(pre_pi.hProcess, INFINITE);
+            DWORD pre_exit = 1;
+            GetExitCodeProcess(pre_pi.hProcess, &pre_exit);
+            CloseHandle(pre_pi.hProcess);
+            CloseHandle(pre_pi.hThread);
+            if (pre_exit != 0) {
+                log_error("executor", "Pre-job script failed (exit %lu) for job %s", pre_exit, job->id);
+                if (hStdout != INVALID_HANDLE_VALUE) CloseHandle(hStdout);
+                if (hStderr != INVALID_HANDLE_VALUE) CloseHandle(hStderr);
+                free(env_block);
+                return -1;
+            }
+            log_info("executor", "Pre-job script OK for job %s", job->id);
+        } else {
+            log_error("executor", "Cannot start pre-job script: %lu", GetLastError());
+        }
+    }
 
     /* Always run via cmd /c so that built-in commands (echo, dir, set…)
        and shell features (pipes, redirections) work correctly. */
@@ -184,9 +222,25 @@ static int spawn_process(Job *job)
         int fde = open(stderr_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fdo >= 0) { dup2(fdo, STDOUT_FILENO); close(fdo); }
         if (fde >= 0) { dup2(fde, STDERR_FILENO); close(fde); }
-        setenv("ORCH_JOB_ID",     job->id,         1);
-        setenv("ORCH_INPUT_DIR",  job->input_dir,  1);
-        setenv("ORCH_OUTPUT_DIR", job->output_dir, 1);
+        setenv("ORCH_JOB_ID",       job->id,         1);
+        setenv("ORCH_INPUT_DIR",    job->input_dir,  1);
+        setenv("ORCH_OUTPUT_DIR",   job->output_dir, 1);
+        setenv("ORCH_MACHINE_IDS",  job->machine_id, 1);
+        /* n_machines as string */
+        char _nm[8]; snprintf(_nm, sizeof(_nm), "%d", job->n_machines);
+        setenv("ORCH_MACHINE_COUNT", _nm, 1);
+
+        /* Pre-job script (Linux): run synchronously in child before exec */
+        if (g_config.pre_job_script_linux[0]) {
+            int pre_ret = system(g_config.pre_job_script_linux);
+            if (pre_ret != 0) {
+                /* Write error to stderr log then abort */
+                fprintf(stderr, "[executor] Pre-job script failed (exit %d) for job %s\n",
+                        WEXITSTATUS(pre_ret), job->id);
+                _exit(126);
+            }
+        }
+
         execvp(we.we_wordv[0], we.we_wordv);
         _exit(127);
     }

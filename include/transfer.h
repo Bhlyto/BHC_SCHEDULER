@@ -1,6 +1,8 @@
 #ifndef TRANSFER_H
 #define TRANSFER_H
 
+#include "mongoose.h"
+
 /*
  * transfer.h
  * File transfer layer: input upload / output download.

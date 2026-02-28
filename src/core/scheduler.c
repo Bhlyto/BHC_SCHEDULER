@@ -46,25 +46,57 @@ static void *scheduler_thread(void *arg)
         Job *job = queue_try_pop(s_queue);
         if (!job) continue;
 
-        if (!alloc_can_fit(job->req_cores, job->req_gpu,
-                           job->req_ram_mb, job->req_disk_mb)) {
-            /* No machine free — put back and wait for next cycle */
+        int can_single = alloc_can_fit(job->req_cores, job->req_gpu,
+                                        job->req_ram_mb, job->req_disk_mb);
+        int can_multi  = !can_single
+                       ? alloc_can_fit_multi(job->req_cores, job->req_gpu,
+                                             job->req_ram_mb, job->req_disk_mb)
+                       : 0;
+
+        if (!can_single && !can_multi) {
+            /* No resources available at all — put back and wait */
             queue_push(s_queue, job);
             log_debug("scheduler", "No resources for job %s, re-queued", job->id);
             continue;
         }
 
-        char machine_id[64] = {0};
-        if (alloc_reserve(job->id,
-                          job->req_cores, job->req_gpu,
-                          job->req_ram_mb, job->req_disk_mb,
-                          machine_id) != 0) {
+        int dispatched = 0;
+        if (can_single) {
+            /* ── Single-machine path ── */
+            char machine_id[64] = {0};
+            if (alloc_reserve(job->id,
+                              job->req_cores, job->req_gpu,
+                              job->req_ram_mb, job->req_disk_mb,
+                              machine_id) == 0) {
+                strncpy(job->machine_id, machine_id, sizeof(job->machine_id) - 1);
+                job->n_machines = 1;
+                log_info("scheduler", "Dispatching job %s to %s", job->id, machine_id);
+                dispatched = 1;
+            }
+        }
+
+        if (!dispatched && can_multi) {
+            /* ── Multi-machine path ── */
+            char machine_ids[1024] = {0};
+            int  n_machines = 0;
+            if (alloc_reserve_multi(job->id,
+                                    job->req_cores, job->req_gpu,
+                                    job->req_ram_mb, job->req_disk_mb,
+                                    machine_ids, &n_machines) == 0) {
+                strncpy(job->machine_id, machine_ids, sizeof(job->machine_id) - 1);
+                job->n_machines = n_machines;
+                log_info("scheduler",
+                         "Dispatching job %s across %d machines: %s",
+                         job->id, n_machines, machine_ids);
+                dispatched = 1;
+            }
+        }
+
+        if (!dispatched) {
             queue_push(s_queue, job);
             continue;
         }
-        strncpy(job->machine_id, machine_id, sizeof(job->machine_id) - 1);
 
-        log_info("scheduler", "Dispatching job %s to %s", job->id, machine_id);
         executor_spawn(job);
     }
 

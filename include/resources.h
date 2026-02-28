@@ -6,7 +6,7 @@
  * Machine registry and resource allocator.
  */
 
-#define MAX_MACHINES 64
+#define MAX_MACHINES 1024
 
 typedef struct {
     char id[64];
@@ -46,19 +46,38 @@ int  registry_remove(const char *machine_id);
 
 /* ── Allocator ───────────────────────────────── */
 
-/* Find a machine that can satisfy the requirements and reserve the resources.
+#define ALLOC_MAX_MACHINES_PER_JOB 16
+
+/* Find a single machine that can satisfy the requirements and reserve.
    Writes the chosen machine_id into out_machine_id (must be >=64 bytes).
-   Returns 0 on success, -1 if no machine has enough free resources. */
+   Returns 0 on success, -1 if no single machine has enough free resources. */
 int  alloc_reserve(const char *job_id,
                    int req_cores, int req_gpu,
                    int req_ram_mb, int req_disk_mb,
                    char *out_machine_id);
 
-/* Release resources previously reserved for job_id. */
+/* Spread req_cores across multiple machines when no single machine fits.
+   out_machine_ids : comma-separated list, buffer must be >= 1024 bytes.
+   out_n_machines  : number of machines selected.
+   RAM/disk split equally across selected machines.
+   GPU jobs (req_gpu > 0) cannot use multi-machine mode.
+   Returns 0 on success, -1 if even combined resources are insufficient. */
+int  alloc_reserve_multi(const char *job_id,
+                         int req_cores, int req_gpu,
+                         int req_ram_mb, int req_disk_mb,
+                         char *out_machine_ids,
+                         int  *out_n_machines);
+
+/* Release resources previously reserved for job_id (single or multi). */
 int  alloc_release(const char *job_id);
 
-/* Check (without reserving) whether any machine can satisfy requirements. */
+/* Check (without reserving) whether any single machine can satisfy requirements. */
 int  alloc_can_fit(int req_cores, int req_gpu,
                    int req_ram_mb, int req_disk_mb);
+
+/* Check whether combined free cores across all machines can satisfy req_cores.
+   Returns estimated number of machines that would be needed, 0 if impossible. */
+int  alloc_can_fit_multi(int req_cores, int req_gpu,
+                         int req_ram_mb, int req_disk_mb);
 
 #endif /* RESOURCES_H */

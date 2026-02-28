@@ -69,8 +69,10 @@ int config_load(const char *path)
         else if (strcmp(key, "db_path")              == 0) strncpy(g_config.db_path,             val, sizeof(g_config.db_path)-1);
         else if (strcmp(key, "provisioning_json")    == 0) strncpy(g_config.provisioning_json,   val, sizeof(g_config.provisioning_json)-1);
         else if (strcmp(key, "log_level")            == 0) strncpy(g_config.log_level,           val, sizeof(g_config.log_level)-1);
-        else if (strcmp(key, "cleanup_ttl_seconds")  == 0) g_config.cleanup_ttl_seconds    = atoi(val);
-        else if (strcmp(key, "scheduler_poll_ms")    == 0) g_config.scheduler_poll_ms      = atoi(val);
+        else if (strcmp(key, "cleanup_ttl_seconds")    == 0) g_config.cleanup_ttl_seconds      = atoi(val);
+        else if (strcmp(key, "scheduler_poll_ms")      == 0) g_config.scheduler_poll_ms        = atoi(val);
+        else if (strcmp(key, "pre_job_script_win")     == 0) strncpy(g_config.pre_job_script_win,   val, sizeof(g_config.pre_job_script_win)-1);
+        else if (strcmp(key, "pre_job_script_linux")   == 0) strncpy(g_config.pre_job_script_linux, val, sizeof(g_config.pre_job_script_linux)-1);
         else fprintf(stderr, "[config] Unknown key: %s\n", key);
     }
     fclose(f);
