@@ -64,7 +64,10 @@ static cJSON *job_to_json(const Job *job)
     cJSON_AddNumberToObject(obj, "submitted_at",(double)job->submitted_at);
     cJSON_AddNumberToObject(obj, "started_at",  (double)job->started_at);
     cJSON_AddNumberToObject(obj, "ended_at",    (double)job->ended_at);
-    cJSON_AddNumberToObject(obj, "exit_code",   job->exit_code);
+    cJSON_AddNumberToObject(obj, "exit_code",        job->exit_code);
+    cJSON_AddNumberToObject(obj, "timeout_seconds",   job->timeout_seconds);
+    cJSON_AddStringToObject(obj, "status_reason",     job->status_reason);
+    cJSON_AddStringToObject(obj, "input_files",       job->input_files);
     return obj;
 }
 
@@ -72,7 +75,7 @@ static cJSON *job_to_json(const Job *job)
 
 static void submit_job(struct mg_connection *c, struct mg_http_message *hm)
 {
-    char body[1024] = {0};
+    char body[4096] = {0};
     size_t blen = hm->body.len < sizeof(body)-1 ? hm->body.len : sizeof(body)-1;
     memcpy(body, hm->body.buf, blen);
 
@@ -85,6 +88,7 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm)
     cJSON *jgpu  = cJSON_GetObjectItemCaseSensitive(req, "req_gpu");
     cJSON *jram  = cJSON_GetObjectItemCaseSensitive(req, "req_ram_mb");
     cJSON *jdisk = cJSON_GetObjectItemCaseSensitive(req, "req_disk_mb");
+    cJSON *jtout = cJSON_GetObjectItemCaseSensitive(req, "timeout_seconds");
     if (!jcor)  jcor  = cJSON_GetObjectItemCaseSensitive(req, "cores");
     if (!jgpu)  jgpu  = cJSON_GetObjectItemCaseSensitive(req, "gpu");
     if (!jram)  jram  = cJSON_GetObjectItemCaseSensitive(req, "ram_mb");
@@ -94,6 +98,19 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm)
         cJSON_Delete(req);
         http_error(c, 400, "Missing 'command'");
         return;
+    }
+
+    char input_files_str[2048] = {0};
+    cJSON *jfiles = cJSON_GetObjectItemCaseSensitive(req, "input_files");
+    if (cJSON_IsArray(jfiles)) {
+        cJSON *f;
+        cJSON_ArrayForEach(f, jfiles) {
+            if (cJSON_IsString(f) && f->valuestring[0]) {
+                if (input_files_str[0])
+                    strncat(input_files_str, ",", sizeof(input_files_str) - strlen(input_files_str) - 1);
+                strncat(input_files_str, f->valuestring, sizeof(input_files_str) - strlen(input_files_str) - 1);
+            }
+        }
     }
 
     Job *job = job_create(
@@ -107,11 +124,55 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm)
     cJSON_Delete(req);
     if (!job) { http_error(c, 500, "Failed to create job"); return; }
 
-    queue_push(scheduler_queue(), job);
+    int is_held = (input_files_str[0] != '\0');
+
+    /* Apply per-job timeout if provided */
+    int job_timeout = cJSON_IsNumber(jtout) ? (int)jtout->valuedouble : 0;
+    if (job_timeout > 0) {
+        job->timeout_seconds = job_timeout;
+        db_update_job_timeout(job->id, job_timeout);
+    }
+
+    if (is_held) {
+        strncpy(job->input_files, input_files_str, sizeof(job->input_files) - 1);
+        job->status = JOB_STATUS_HELD;
+        db_update_job_status(job->id, JOB_STATUS_HELD, 0, 0);
+        db_update_input_files(job->id, input_files_str);
+        char held_reason[256];
+        snprintf(held_reason, sizeof(held_reason),
+            "Waiting for input files: %s", input_files_str);
+        strncpy(job->status_reason, held_reason, sizeof(job->status_reason) - 1);
+        db_update_status_reason(job->id, held_reason);
+        store_init_job_dirs(job->id);
+        log_info("routes", "Job %s held, expecting: %s", job->id, input_files_str);
+    } else {
+        queue_push(scheduler_queue(), job);
+    }
 
     cJSON *resp = job_to_json(job);
     char *s = cJSON_PrintUnformatted(resp);
     http_json_reply(c, 201, s);
+    free(s);
+    cJSON_Delete(resp);
+    if (is_held) job_free(job);
+}
+
+static void release_job(struct mg_connection *c, struct mg_http_message *hm,
+                        const char *job_id)
+{
+    (void)hm;
+    Job *job = db_get_job(job_id);
+    if (!job) { http_error(c, 404, "Job not found"); return; }
+    if (job->status != JOB_STATUS_HELD) {
+        http_error(c, 409, "Job is not in HELD state");
+        job_free(job);
+        return;
+    }
+    job_set_status_r(job, JOB_STATUS_IN_QUEUE, "Released manually by user");
+    queue_push(scheduler_queue(), job);
+    cJSON *resp = job_to_json(job);
+    char *s = cJSON_PrintUnformatted(resp);
+    http_json_reply(c, 200, s);
     free(s);
     cJSON_Delete(resp);
 }
@@ -119,13 +180,15 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm)
 static void list_jobs(struct mg_connection *c, struct mg_http_message *hm)
 {
     (void)hm;
-    Job jobs[256];
+    Job *jobs = (Job *)malloc(256 * sizeof(Job));
+    if (!jobs) { http_error(c, 500, "Out of memory"); return; }
     int count = db_list_jobs(jobs, 256);
     cJSON *arr = cJSON_CreateArray();
     for (int i = 0; i < count; i++) {
         cJSON *obj = job_to_json(&jobs[i]);
         cJSON_AddItemToArray(arr, obj);
     }
+    free(jobs);
     char *s = cJSON_PrintUnformatted(arr);
     http_json_reply(c, 200, s);
     free(s);
@@ -159,7 +222,7 @@ static void cancel_job(struct mg_connection *c, struct mg_http_message *hm,
         job_free(job);
         return;
     }
-    job_set_status(job, JOB_STATUS_CANCELLED);
+    job_set_status_r(job, JOB_STATUS_CANCELLED, "Cancelled by user");
     alloc_release(job_id);
     cJSON *resp = job_to_json(job);
     char *s = cJSON_PrintUnformatted(resp);
@@ -192,6 +255,45 @@ static void purge_jobs(struct mg_connection *c, struct mg_http_message *hm)
     log_info("routes", "Purged %d terminal jobs (%d work dirs cleaned)", deleted, cleaned);
 }
 
+static void check_and_auto_release(const char *job_id)
+{
+    Job *job = db_get_job(job_id);
+    if (!job || job->status != JOB_STATUS_HELD || !job->input_files[0]) {
+        job_free(job);
+        return;
+    }
+
+    char input_dir[512];
+    store_input_dir(job_id, input_dir, sizeof(input_dir));
+
+    char files_copy[2048];
+    strncpy(files_copy, job->input_files, sizeof(files_copy) - 1);
+
+    int all_present = 1;
+    char *tok = strtok(files_copy, ",");
+    while (tok) {
+        while (*tok == ' ') tok++;
+        char path[768];
+#ifdef _WIN32
+        snprintf(path, sizeof(path), "%s\\%s", input_dir, tok);
+#else
+        snprintf(path, sizeof(path), "%s/%s", input_dir, tok);
+#endif
+        FILE *f = fopen(path, "rb");
+        if (!f) { all_present = 0; break; }
+        fclose(f);
+        tok = strtok(NULL, ",");
+    }
+
+    if (all_present) {
+        log_info("routes", "All input files received for job %s — releasing to queue", job_id);
+        job_set_status_r(job, JOB_STATUS_IN_QUEUE, "All input files received via upload");
+        queue_push(scheduler_queue(), job);
+    } else {
+        job_free(job);
+    }
+}
+
 static void upload_input(struct mg_connection *c, struct mg_http_message *hm,
                           const char *job_id, const char *filename)
 {
@@ -201,6 +303,7 @@ static void upload_input(struct mg_connection *c, struct mg_http_message *hm,
     char buf[64];
     snprintf(buf, sizeof(buf), "{\"bytes\":%ld}", written);
     http_json_reply(c, 200, buf);
+    check_and_auto_release(job_id);
 }
 
 static void download_output(struct mg_connection *c, struct mg_http_message *hm,
@@ -250,10 +353,11 @@ static void sse_subscribe(struct mg_connection *c, struct mg_http_message *hm)
         "\r\n");
     httpd_sse_add(c);
 
-    Job jobs[256];
-    int count = db_list_jobs(jobs, 256);
+    Job *jobs = (Job *)malloc(256 * sizeof(Job));
+    int count = jobs ? db_list_jobs(jobs, 256) : 0;
     cJSON *arr = cJSON_CreateArray();
     for (int i = 0; i < count; i++) cJSON_AddItemToArray(arr, job_to_json(&jobs[i]));
+    free(jobs);
     char *s = cJSON_PrintUnformatted(arr);
     mg_printf(c, "event: snapshot\ndata: %s\n\n", s);
     free(s);
@@ -279,6 +383,7 @@ static void get_stats(struct mg_connection *c, struct mg_http_message *hm)
 
     cJSON *jobs = cJSON_CreateObject();
     cJSON_AddNumberToObject(jobs, "total",     js.total);
+    cJSON_AddNumberToObject(jobs, "held",      js.held);
     cJSON_AddNumberToObject(jobs, "in_queue",  js.in_queue);
     cJSON_AddNumberToObject(jobs, "starting",  js.starting);
     cJSON_AddNumberToObject(jobs, "running",   js.running);
@@ -417,6 +522,9 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
             }
             if (strcmp(method, "DELETE") == 0 && seg[2][0] == '\0') {
                 cancel_job(c, hm, seg[1]); return;
+            }
+            if (strcmp(method, "POST") == 0 && strcmp(seg[2], "release") == 0 && seg[3][0] == '\0') {
+                release_job(c, hm, seg[1]); return;
             }
             if (strcmp(method, "POST") == 0 && strcmp(seg[2], "input") == 0 && seg[3][0]) {
                 upload_input(c, hm, seg[1], seg[3]); return;

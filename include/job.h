@@ -12,7 +12,8 @@ typedef enum {
     JOB_STATUS_RUNNING   = 2,
     JOB_STATUS_FINISHED  = 3,
     JOB_STATUS_CANCELLED = 4,
-    JOB_STATUS_FAILED    = 5
+    JOB_STATUS_FAILED    = 5,
+    JOB_STATUS_HELD      = 6
 } JobStatus;
 
 typedef struct {
@@ -31,12 +32,15 @@ typedef struct {
 
     char       input_dir[512];
     char       output_dir[512];
+    char       input_files[2048]; /* comma-separated expected filenames, empty = no hold */
 
     time_t     submitted_at;
     time_t     started_at;
     time_t     ended_at;
 
     int        exit_code;
+    int        timeout_seconds; /* 0 = no timeout */
+    char       status_reason[256]; /* human-readable cause of the last status transition */
 } Job;
 
 Job *job_create(const char *command, int priority,
@@ -44,6 +48,7 @@ Job *job_create(const char *command, int priority,
                 int req_ram_mb, int req_disk_mb);
 void job_free(Job *job);
 int  job_set_status(Job *job, JobStatus new_status);
+int  job_set_status_r(Job *job, JobStatus new_status, const char *reason);
 const char *job_status_str(JobStatus s);
 
 #endif /* JOB_H */

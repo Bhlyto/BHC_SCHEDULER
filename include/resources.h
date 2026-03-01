@@ -68,6 +68,11 @@ int  alloc_release(const char *job_id);
 int  alloc_can_fit(int req_cores, int req_gpu,
                    int req_ram_mb, int req_disk_mb);
 
+/* Explain why no machine can satisfy the requirements (for diagnostics). */
+void alloc_diagnose(int req_cores, int req_gpu,
+                    int req_ram_mb, int req_disk_mb,
+                    char *out, int out_len);
+
 /* Check whether combined free cores across all machines can satisfy req_cores.
    Returns estimated number of machines that would be needed, 0 if impossible. */
 int  alloc_can_fit_multi(int req_cores, int req_gpu,

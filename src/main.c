@@ -26,13 +26,16 @@ static void resolve_config_paths(void)
 {
     char tmp[MAX_PATH];
 #define RESOLVE(field) \
-    if (!strchr(g_config.field, ':')) { \
+    if (g_config.field[0] && !strchr(g_config.field, ':')) { \
         exe_relative_path(g_config.field, tmp, sizeof(tmp)); \
         strncpy(g_config.field, tmp, sizeof(g_config.field) - 1); \
     }
     RESOLVE(db_path);
     RESOLVE(work_dir);
     RESOLVE(provisioning_json);
+    RESOLVE(pre_job_script_win);
+    RESOLVE(ssh_key);
+    RESOLVE(temp_dir);
 #undef RESOLVE
 }
 #else

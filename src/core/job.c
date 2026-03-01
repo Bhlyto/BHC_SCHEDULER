@@ -41,9 +41,10 @@
 static int transition_allowed(JobStatus from, JobStatus to)
 {
     switch (from) {
+        case JOB_STATUS_HELD:      return to == JOB_STATUS_IN_QUEUE   || to == JOB_STATUS_CANCELLED;
         case JOB_STATUS_IN_QUEUE:  return to == JOB_STATUS_STARTING  || to == JOB_STATUS_CANCELLED;
-        case JOB_STATUS_STARTING:  return to == JOB_STATUS_RUNNING    || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
-        case JOB_STATUS_RUNNING:   return to == JOB_STATUS_FINISHED   || to == JOB_STATUS_FAILED;
+        case JOB_STATUS_STARTING:  return to == JOB_STATUS_RUNNING   || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
+        case JOB_STATUS_RUNNING:   return to == JOB_STATUS_FINISHED  || to == JOB_STATUS_FAILED;
         default:                   return 0; /* terminal states */
     }
 }
@@ -51,6 +52,7 @@ static int transition_allowed(JobStatus from, JobStatus to)
 const char *job_status_str(JobStatus s)
 {
     switch (s) {
+        case JOB_STATUS_HELD:      return "HELD";
         case JOB_STATUS_IN_QUEUE:  return "IN_QUEUE";
         case JOB_STATUS_STARTING:  return "STARTING";
         case JOB_STATUS_RUNNING:   return "RUNNING";
@@ -90,15 +92,27 @@ void job_free(Job *job)
 
 int job_set_status(Job *job, JobStatus new_status)
 {
+    return job_set_status_r(job, new_status, "");
+}
+
+int job_set_status_r(Job *job, JobStatus new_status, const char *reason)
+{
     if (!transition_allowed(job->status, new_status)) {
         log_warn("job", "Invalid transition %s -> %s for job %s",
                  job_status_str(job->status), job_status_str(new_status), job->id);
         return -1;
     }
 
-    log_info("job", "Job %s: %s -> %s",
-             job->id, job_status_str(job->status), job_status_str(new_status));
+    if (reason && reason[0])
+        log_info("job", "Job %s: %s -> %s — %s",
+                 job->id, job_status_str(job->status),
+                 job_status_str(new_status), reason);
+    else
+        log_info("job", "Job %s: %s -> %s",
+                 job->id, job_status_str(job->status), job_status_str(new_status));
+
     job->status = new_status;
+    if (reason) strncpy(job->status_reason, reason, sizeof(job->status_reason) - 1);
 
     time_t now = time(NULL);
     switch (new_status) {
@@ -113,10 +127,15 @@ int job_set_status(Job *job, JobStatus new_status)
             break;
     }
 
+    if (reason && reason[0])
+        db_update_status_reason(job->id, reason);
+
     char evt[EVENTS_JSON_MAX];
     snprintf(evt, sizeof(evt),
-        "{\"event\":\"job_status\",\"id\":\"%s\",\"status\":\"%s\",\"machine_id\":\"%s\"}",
-        job->id, job_status_str(new_status), job->machine_id);
+        "{\"event\":\"job_status\",\"id\":\"%s\",\"status\":\"%s\","
+        "\"machine_id\":\"%s\",\"reason\":\"%s\"}",
+        job->id, job_status_str(new_status), job->machine_id,
+        reason ? reason : "");
     events_push(evt);
 
     return 0;

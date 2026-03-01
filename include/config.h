@@ -11,6 +11,15 @@ typedef struct {
     int  scheduler_poll_ms;
     char pre_job_script_win[512];
     char pre_job_script_linux[512];
+    int  job_timeout_seconds;   /* 0 = no timeout */
+
+    char temp_dir[512];          /* temp dir for known_hosts etc. (empty = system default) */
+    char pid_file[512];          /* PID file path (Linux daemon only) */
+
+    /* ── Remote execution (SSH) ── */
+    char ssh_user[64];           /* remote login, e.g. "deploy" */
+    char ssh_key[512];           /* path to private key, no passphrase */
+    char ssh_remote_work_dir[512]; /* base dir on remote, e.g. /tmp/orch */
 } Config;
 
 extern Config g_config;

@@ -1,9 +1,9 @@
-{
+﻿{
   "machines": [
     {
-      "id":        "local",
-      "hostname":  "localhost",
-      "ip":        "127.0.0.1",
+      "id":        "worker-01",
+      "hostname":  "worker-01.local",
+      "ip":        "10.0.0.1",
       "enabled":   true,
       "cores":     4,
       "gpu_count": 0,
@@ -11,20 +11,18 @@
       "disk_mb":   102400
     }
   ],
-
   "pools": [
     {
-      "_comment":       "Exemple : server-001 à server-128",
-      "id_prefix":      "server-",
-      "hostname_format": "server-%03d.example.com",
-      "ip_format":      "10.0.1.%d",
-      "range_start":    1,
-      "range_end":      128,
-      "enabled":        false,
-      "cores":          16,
-      "gpu_count":      0,
-      "ram_mb":         32768,
-      "disk_mb":        512000
+      "id_prefix":       "node-",
+      "hostname_format": "node-%03d.local",
+      "ip_format":       "10.0.1.%d",
+      "range_start":     1,
+      "range_end":       10,
+      "enabled":         true,
+      "cores":           4,
+      "gpu_count":       0,
+      "ram_mb":          8192,
+      "disk_mb":         102400
     }
   ]
 }

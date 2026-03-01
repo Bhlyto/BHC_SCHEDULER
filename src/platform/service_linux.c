@@ -1,5 +1,6 @@
 #ifndef _WIN32
 #include "platform.h"
+#include "config.h"
 #include "log.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,7 +58,7 @@ static void daemonise(void)
 void platform_service_start(int argc, char **argv)
 {
     int do_daemon = 0;
-    const char *pidfile = "/var/run/orchestrator.pid";
+    const char *pidfile = g_config.pid_file[0] ? g_config.pid_file : "/var/run/orchestrator.pid";
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--daemon") == 0) do_daemon = 1;

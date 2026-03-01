@@ -55,6 +55,74 @@ int alloc_can_fit(int req_cores, int req_gpu, int req_ram_mb, int req_disk_mb)
     return 0;
 }
 
+/*
+ * Fill `out` with a human-readable explanation of why no machine can satisfy
+ * the requirements. Helps diagnose jobs stuck IN_QUEUE.
+ */
+void alloc_diagnose(int req_cores, int req_gpu, int req_ram_mb, int req_disk_mb,
+                    char *out, int out_len)
+{
+    int count;
+    Machine *ms = registry_all(&count);
+
+    if (count == 0) {
+        snprintf(out, out_len, "No machines registered (check provisioning.json)");
+        return;
+    }
+
+    int n_enabled = 0, n_cores = 0, n_gpu = 0, n_ram = 0, n_disk = 0;
+    int best_free_cores = 0, best_free_ram = 0, best_free_disk = 0;
+
+    for (int i = 0; i < count; i++) {
+        Machine *M = &ms[i];
+        if (!M->enabled) continue;
+        n_enabled++;
+        int fc = M->cores_total     - M->cores_reserved;
+        int fg = M->gpu_count_total - M->gpu_count_reserved;
+        int fr = M->ram_mb_total    - M->ram_mb_reserved;
+        int fd = M->disk_mb_total   - M->disk_mb_reserved;
+        if (fc > best_free_cores) best_free_cores = fc;
+        if (fr > best_free_ram)   best_free_ram   = fr;
+        if (fd > best_free_disk)  best_free_disk  = fd;
+        if (fc >= req_cores)  n_cores++;
+        if (fg >= req_gpu)    n_gpu++;
+        if (fr >= req_ram_mb) n_ram++;
+        if (fd >= req_disk_mb)n_disk++;
+    }
+
+    if (n_enabled == 0) {
+        snprintf(out, out_len,
+            "All %d registered machine(s) are disabled", count);
+        return;
+    }
+
+    /* Build a constraint failure description */
+    char parts[4][80]; int np = 0;
+    if (n_cores == 0)
+        snprintf(parts[np++], 80, "cores: need %d, best available %d",
+                 req_cores, best_free_cores);
+    if (req_gpu > 0 && n_gpu == 0)
+        snprintf(parts[np++], 80, "GPU: need %d, none available", req_gpu);
+    if (n_ram == 0)
+        snprintf(parts[np++], 80, "RAM: need %d MB, best available %d MB",
+                 req_ram_mb, best_free_ram);
+    if (n_disk == 0)
+        snprintf(parts[np++], 80, "disk: need %d MB, best available %d MB",
+                 req_disk_mb, best_free_disk);
+
+    if (np == 0) {
+        /* Individual constraints pass but combined don't (race between reserve checks) */
+        snprintf(out, out_len, "Resources temporarily unavailable (contention)");
+        return;
+    }
+
+    int pos = snprintf(out, out_len, "No machine satisfies: ");
+    for (int i = 0; i < np && pos < out_len - 2; i++) {
+        if (i > 0) pos += snprintf(out + pos, out_len - pos, "; ");
+        pos += snprintf(out + pos, out_len - pos, "%s", parts[i]);
+    }
+}
+
 int alloc_can_fit_multi(int req_cores, int req_gpu,
                         int req_ram_mb, int req_disk_mb)
 {
