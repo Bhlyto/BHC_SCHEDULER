@@ -102,9 +102,11 @@ static void sha256_hex(const char *input, char *out_hex)
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
-int auth_check(struct mg_connection *c, struct mg_http_message *hm)
+
+/* Shared helper: extract key from header, hash it, fill out_hash (65 bytes).
+   Returns 1 on success, 0 if header is missing. */
+static int extract_key_hash(struct mg_http_message *hm, char *out_hash)
 {
-    (void)c;
     struct mg_str *hdr = mg_http_get_header(hm, "X-API-Key");
     if (!hdr || hdr->len == 0) {
         log_warn("auth", "Missing X-API-Key header");
@@ -116,11 +118,37 @@ int auth_check(struct mg_connection *c, struct mg_http_message *hm)
     memcpy(raw_key, hdr->buf, klen);
     raw_key[klen] = '\0';
 
+    sha256_hex(raw_key, out_hash);
+    return 1;
+}
+
+int auth_check(struct mg_connection *c, struct mg_http_message *hm)
+{
+    (void)c;
     char hash[65];
-    sha256_hex(raw_key, hash);
+    if (!extract_key_hash(hm, hash)) return 0;
 
     int valid = db_validate_api_key(hash);
     if (!valid) log_warn("auth", "Invalid API key (hash=%s...)", hash);
+    return valid;
+}
+
+int auth_check_role(struct mg_connection *c, struct mg_http_message *hm,
+                    char *out_role)
+{
+    char uid[128] = {0};
+    return auth_check_role_user(c, hm, out_role, uid);
+}
+
+int auth_check_role_user(struct mg_connection *c, struct mg_http_message *hm,
+                         char *out_role, char *out_user_id)
+{
+    (void)c;
+    char hash[65];
+    if (!extract_key_hash(hm, hash)) return 0;
+
+    int valid = db_resolve_api_key_full(hash, out_role, out_user_id, 128);
+    if (!valid) log_warn("auth", "Invalid or expired API key (hash=%s...)", hash);
     return valid;
 }
 

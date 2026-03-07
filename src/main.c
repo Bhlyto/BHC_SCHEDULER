@@ -85,7 +85,9 @@ void orchestrator_run(void)
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "keygen") == 0) {
-        const char *label  = "default";
+        const char *label   = "default";
+        const char *role    = "admin";
+        const char *user_id = "";
 #ifdef _WIN32
         char _conf_buf[MAX_PATH]; exe_relative_path("config\\orchestrator.conf", _conf_buf, sizeof(_conf_buf));
         const char *conf = _conf_buf;
@@ -93,8 +95,10 @@ int main(int argc, char **argv)
         const char *conf   = "config/orchestrator.conf";
 #endif
         for (int i = 2; i < argc - 1; i++) {
-            if (strcmp(argv[i], "--label") == 0) label = argv[i+1];
-            if (strcmp(argv[i], "--conf")  == 0) conf  = argv[i+1];
+            if (strcmp(argv[i], "--label") == 0) label   = argv[i+1];
+            if (strcmp(argv[i], "--conf")  == 0) conf    = argv[i+1];
+            if (strcmp(argv[i], "--role")  == 0) role    = argv[i+1];
+            if (strcmp(argv[i], "--user")  == 0) user_id = argv[i+1];
         }
         config_defaults();
         config_load(conf);
@@ -128,8 +132,9 @@ int main(int argc, char **argv)
         char hash[65];
         auth_hash_key(raw_hex, hash);
 
-        if (db_insert_api_key(hash, label) == 0) {
-            printf("API Key generated for label '%s':\n%s\n", label, raw_hex);
+        if (db_insert_api_key_full(hash, label, role, user_id, 0) == 0) {
+            printf("API Key generated for label '%s' (role=%s, user=%s):\n%s\n",
+                   label, role, user_id[0] ? user_id : "(none)", raw_hex);
             printf("Store this key — it will not be shown again.\n");
         } else {
             fprintf(stderr, "Failed to insert key (duplicate?)\n");

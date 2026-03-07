@@ -22,6 +22,19 @@ void httpd_sse_add(struct mg_connection *c);
    Returns 1 if valid, 0 if missing/invalid. */
 int auth_check(struct mg_connection *c, struct mg_http_message *hm);
 
+/* Same as auth_check but also resolves the role ("admin" or "user").
+   out_role must be >= 16 bytes. Returns 1 if valid. */
+int auth_check_role(struct mg_connection *c, struct mg_http_message *hm,
+                    char *out_role);
+
+/* Same as auth_check_role but also resolves the user_id tied to the key.
+   out_user_id must be >= 128 bytes. Returns 1 if valid. */
+int auth_check_role_user(struct mg_connection *c, struct mg_http_message *hm,
+                         char *out_role, char *out_user_id);
+
+/* Hash a raw API key to its SHA-256 hex representation (65-byte buffer). */
+void auth_hash_key(const char *raw_key, char *out_hex_65);
+
 /* ── Response helpers ────────────────────────── */
 
 /* Send a JSON body with given HTTP status code (e.g. 200, 201, 400, 401). */

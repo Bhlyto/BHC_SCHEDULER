@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BHC Orchestrator</title>
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="loginScreen" class="login-wrap">
+  <div class="login-box">
+    <h1>BHC Orchestrator</h1>
+    <p>Sign in to your account</p>
+    <div id="loginError" class="error"></div>
+    <label>User ID</label>
+    <input type="text" id="loginUser" placeholder="user_id" autocomplete="username">
+    <label>Password</label>
+    <input type="password" id="loginPass" placeholder="password" autocomplete="current-password">
+    <button class="btn btn-primary btn-full" onclick="doLogin()">Sign In</button>
+    <div style="margin-top:16px; text-align:center;">
+      <span style="font-size:13px;color:var(--text2)">or use an API key</span>
+    </div>
+    <input type="text" id="loginApiKey" placeholder="X-API-Key" style="margin-top:8px">
+    <button class="btn btn-outline btn-full" onclick="doApiKeyLogin()">Connect with API Key</button>
+  </div>
+</div>
+
+<!-- App Shell -->
+<div id="app" class="app">
+  <div class="topbar">
+    <h1>BHC Orchestrator</h1>
+    <div class="topbar-right">
+      <span id="userInfo"></span>
+      <button class="btn btn-sm btn-outline" onclick="showChangePassword()">Password</button>
+      <button class="btn btn-sm btn-outline" onclick="doLogout()">Logout</button>
+    </div>
+  </div>
+  <div class="nav" id="navBar">
+    <button class="nav-btn active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
+    <button class="nav-btn" data-tab="jobs" onclick="switchTab('jobs')">Jobs</button>
+    <button class="nav-btn admin-only" data-tab="users" onclick="switchTab('users')">Users</button>
+    <button class="nav-btn admin-only" data-tab="keys" onclick="switchTab('keys')">API Keys</button>
+    <button class="nav-btn admin-only" data-tab="quotas" onclick="switchTab('quotas')">Quotas</button>
+    <button class="nav-btn admin-only" data-tab="apps" onclick="switchTab('apps')">Apps</button>
+  </div>
+  <div class="content">
+    <!-- Dashboard -->
+    <div id="tab-dashboard" class="tab-content">
+      <div class="stats" id="statsGrid"></div>
+      <div class="card">
+        <div class="card-header"><h2>Recent Jobs</h2></div>
+        <table><thead><tr><th>ID</th><th>Command</th><th>Status</th><th>User</th><th>Submitted</th></tr></thead>
+        <tbody id="recentJobsBody"></tbody></table>
+      </div>
+    </div>
+    <!-- Jobs -->
+    <div id="tab-jobs" class="tab-content" style="display:none">
+      <div class="card">
+        <div class="card-header">
+          <h2>Jobs</h2>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-sm btn-primary" onclick="showSubmitJob()">Submit Job</button>
+            <button class="btn btn-sm btn-outline" onclick="loadJobs()">Refresh</button>
+          </div>
+        </div>
+        <table><thead><tr><th>ID</th><th>Command</th><th>Status</th><th>App</th><th>User</th><th>Submitted</th><th>Actions</th></tr></thead>
+        <tbody id="jobsBody"></tbody></table>
+      </div>
+    </div>
+    <!-- Users -->
+    <div id="tab-users" class="tab-content" style="display:none">
+      <div class="card">
+        <div class="card-header">
+          <h2>Users</h2>
+          <button class="btn btn-sm btn-primary" onclick="showCreateUser()">Create User</button>
+        </div>
+        <table><thead><tr><th>User ID</th><th>Name</th><th>Email</th><th>Enabled</th><th>Jobs</th><th>Actions</th></tr></thead>
+        <tbody id="usersBody"></tbody></table>
+      </div>
+    </div>
+    <!-- Keys -->
+    <div id="tab-keys" class="tab-content" style="display:none">
+      <div class="card">
+        <div class="card-header">
+          <h2>API Keys</h2>
+          <button class="btn btn-sm btn-primary" onclick="showCreateKey()">Create Key</button>
+        </div>
+        <table><thead><tr><th>Label</th><th>Role</th><th>User</th><th>Created</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody id="keysBody"></tbody></table>
+      </div>
+    </div>
+    <!-- Quotas -->
+    <div id="tab-quotas" class="tab-content" style="display:none">
+      <div class="card">
+        <div class="card-header">
+          <h2>Quotas</h2>
+          <button class="btn btn-sm btn-primary" onclick="showCreateQuota()">Create Quota</button>
+        </div>
+        <table><thead><tr><th>User</th><th>App</th><th>Max Jobs</th><th>Max RAM</th><th>Max Cores</th><th>Max Concurrent</th><th>Actions</th></tr></thead>
+        <tbody id="quotasBody"></tbody></table>
+      </div>
+    </div>
+    <!-- Apps -->
+    <div id="tab-apps" class="tab-content" style="display:none">
+      <div class="card">
+        <div class="card-header">
+          <h2>Applications</h2>
+          <button class="btn btn-sm btn-primary" onclick="showCreateApp()">Create App</button>
+        </div>
+        <table><thead><tr><th>ID</th><th>Name</th><th>Command</th><th>Resources</th><th>Fields</th><th>Actions</th></tr></thead>
+        <tbody id="appsBody"></tbody></table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modals -->
+<div class="modal-overlay" id="modal">
+  <div class="modal" id="modalContent"></div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script src="/web/app.js"></script>
+<script src="/web/dashboard.js"></script>
+<script src="/web/jobs.js"></script>
+<script src="/web/admin.js"></script>
+</body>
+</html>

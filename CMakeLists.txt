@@ -81,6 +81,14 @@ add_custom_command(TARGET orchestrator POST_BUILD
     COMMENT "Copying config/ to output directory"
 )
 
+# Copy web/ next to the executable after each build
+add_custom_command(TARGET orchestrator POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/web"
+        "$<TARGET_FILE_DIR:orchestrator>/web"
+    COMMENT "Copying web/ to output directory"
+)
+
 # SQLite needs these on Linux
 if(UNIX)
     target_link_libraries(orchestrator pthread dl m)

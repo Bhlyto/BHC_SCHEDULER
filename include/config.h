@@ -13,6 +13,7 @@ typedef struct {
     char pre_job_script_linux[512];
     int  job_timeout_seconds;   /* 0 = no timeout */
 
+    char apps_dir[512];          /* directory containing app definition JSON files */
     char temp_dir[512];          /* temp dir for known_hosts etc. (empty = system default) */
     char pid_file[512];          /* PID file path (Linux daemon only) */
 

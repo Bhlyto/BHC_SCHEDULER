@@ -48,3 +48,4 @@ orchestrator.db-shm
 orchestrator.db-wal
 .vscode/c_cpp_properties.json
 .gitignore
+test_launch.ps1

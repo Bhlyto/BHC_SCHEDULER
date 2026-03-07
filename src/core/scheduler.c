@@ -160,6 +160,22 @@ static void *scheduler_thread(void *arg)
         Job *job = queue_try_pop(s_queue);
         if (!job) continue;
 
+        /* ── Quota enforcement ─────────────────────────────────── */
+        {
+            char quota_reason[256] = {0};
+            if (db_quota_check(job->user_id, job->app_id,
+                               job->req_cores, job->req_ram_mb,
+                               quota_reason, sizeof(quota_reason)) != 0) {
+                if (tick % 20 == 1) {
+                    log_warn("scheduler", "Job %s blocked by quota: %s",
+                             job->id, quota_reason);
+                }
+                db_update_status_reason(job->id, quota_reason);
+                queue_push(s_queue, job);
+                continue;
+            }
+        }
+
         int can_single = alloc_can_fit(job->req_cores, job->req_gpu,
                                         job->req_ram_mb, job->req_disk_mb);
         int can_multi  = !can_single

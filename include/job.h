@@ -5,6 +5,8 @@
 
 #define JOB_ID_LEN   37
 #define JOB_CMD_LEN  512
+#define JOB_USER_LEN 128
+#define JOB_APP_LEN  128
 
 typedef enum {
     JOB_STATUS_IN_QUEUE  = 0,
@@ -19,6 +21,8 @@ typedef enum {
 typedef struct {
     char       id[JOB_ID_LEN];
     char       command[JOB_CMD_LEN];
+    char       user_id[JOB_USER_LEN];
+    char       app_id[JOB_APP_LEN];
     JobStatus  status;
     int        priority;
 
@@ -46,6 +50,10 @@ typedef struct {
 Job *job_create(const char *command, int priority,
                 int req_cores, int req_gpu,
                 int req_ram_mb, int req_disk_mb);
+Job *job_create_ex(const char *command, int priority,
+                   int req_cores, int req_gpu,
+                   int req_ram_mb, int req_disk_mb,
+                   const char *user_id, const char *app_id);
 void job_free(Job *job);
 int  job_set_status(Job *job, JobStatus new_status);
 int  job_set_status_r(Job *job, JobStatus new_status, const char *reason);

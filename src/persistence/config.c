@@ -15,12 +15,14 @@ void config_defaults(void)
     strncpy(g_config.ssh_remote_work_dir, "/tmp/orch", sizeof(g_config.ssh_remote_work_dir)-1);
     strncpy(g_config.log_level,         "info",                       sizeof(g_config.log_level)-1);
 #ifdef _WIN32
+    strncpy(g_config.apps_dir,          "config\\apps",                sizeof(g_config.apps_dir)-1);
     strncpy(g_config.work_dir,          "jobs",                       sizeof(g_config.work_dir)-1);
     strncpy(g_config.db_path,           "orchestrator.db",            sizeof(g_config.db_path)-1);
     strncpy(g_config.provisioning_json, "config\\provisioning.json",  sizeof(g_config.provisioning_json)-1);
 #else
     strncpy(g_config.work_dir,          "jobs",                       sizeof(g_config.work_dir)-1);
     strncpy(g_config.db_path,           "orchestrator.db",            sizeof(g_config.db_path)-1);
+    strncpy(g_config.apps_dir,          "config/apps",                sizeof(g_config.apps_dir)-1);
     strncpy(g_config.provisioning_json, "config/provisioning.json",   sizeof(g_config.provisioning_json)-1);
     strncpy(g_config.pid_file,          "/var/run/orchestrator.pid",  sizeof(g_config.pid_file)-1);
 #endif
@@ -73,6 +75,7 @@ int config_load(const char *path)
         else if (strcmp(key, "ssh_user")               == 0) strncpy(g_config.ssh_user,              val, sizeof(g_config.ssh_user)-1);
         else if (strcmp(key, "ssh_key")                == 0) strncpy(g_config.ssh_key,               val, sizeof(g_config.ssh_key)-1);
         else if (strcmp(key, "ssh_remote_work_dir")    == 0) strncpy(g_config.ssh_remote_work_dir,   val, sizeof(g_config.ssh_remote_work_dir)-1);
+        else if (strcmp(key, "apps_dir")               == 0) strncpy(g_config.apps_dir,              val, sizeof(g_config.apps_dir)-1);
         else if (strcmp(key, "temp_dir")               == 0) strncpy(g_config.temp_dir,              val, sizeof(g_config.temp_dir)-1);
         else if (strcmp(key, "pid_file")               == 0) strncpy(g_config.pid_file,              val, sizeof(g_config.pid_file)-1);
         else fprintf(stderr, "[config] Unknown key: %s\n", key);

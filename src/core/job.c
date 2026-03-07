@@ -67,11 +67,23 @@ Job *job_create(const char *command, int priority,
                 int req_cores, int req_gpu,
                 int req_ram_mb, int req_disk_mb)
 {
+    return job_create_ex(command, priority,
+                         req_cores, req_gpu, req_ram_mb, req_disk_mb,
+                         "", "");
+}
+
+Job *job_create_ex(const char *command, int priority,
+                   int req_cores, int req_gpu,
+                   int req_ram_mb, int req_disk_mb,
+                   const char *user_id, const char *app_id)
+{
     Job *job = (Job *)calloc(1, sizeof(Job));
     if (!job) return NULL;
 
     gen_uuid(job->id);
     strncpy(job->command, command, sizeof(job->command) - 1);
+    if (user_id) strncpy(job->user_id, user_id, sizeof(job->user_id) - 1);
+    if (app_id)  strncpy(job->app_id,  app_id,  sizeof(job->app_id)  - 1);
     job->status      = JOB_STATUS_IN_QUEUE;
     job->priority    = priority;
     job->req_cores   = req_cores  > 0 ? req_cores  : 1;
@@ -81,7 +93,8 @@ Job *job_create(const char *command, int priority,
     job->submitted_at = time(NULL);
 
     db_insert_job(job);
-    log_info("job", "Created job %s: %s", job->id, job->command);
+    log_info("job", "Created job %s: %s (user=%s app=%s)",
+             job->id, job->command, job->user_id, job->app_id);
     return job;
 }
 
