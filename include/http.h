@@ -16,6 +16,9 @@ void httpd_stop(void);
    Must be called from the HTTP thread (inside a route handler). */
 void httpd_sse_add(struct mg_connection *c);
 
+/* Register an SSE subscriber with user identity for filtered events. */
+void httpd_sse_add_user(struct mg_connection *c, const char *user_id, const char *role);
+
 /* ── Auth ────────────────────────────────────── */
 
 /* Extract X-API-Key header, SHA-256 hash it, look up in DB.
@@ -34,6 +37,12 @@ int auth_check_role_user(struct mg_connection *c, struct mg_http_message *hm,
 
 /* Hash a raw API key to its SHA-256 hex representation (65-byte buffer). */
 void auth_hash_key(const char *raw_key, char *out_hex_65);
+
+/* Hash a password with random salt → "hexsalt$hexhash" (97 chars + NUL). */
+void auth_hash_password(const char *password, char *out_buf_98);
+
+/* Verify a password against a stored hash (salted or legacy). Returns 1 on match. */
+int  auth_verify_password(const char *password, const char *stored_hash);
 
 /* ── Response helpers ────────────────────────── */
 

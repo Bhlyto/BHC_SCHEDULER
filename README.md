@@ -17,12 +17,18 @@ A lightweight daemon written in C that exposes a REST API for submitting, tracki
 - **Job logs** — stdout and stderr of each job are captured and retrievable via API
 - **Pre-job scripts** — run a setup script before each job; receives job context via environment variables
 - **Real-time events** — subscribe to a Server-Sent Events (SSE) stream for live job state updates and an initial snapshot
+- **Event persistence & reporting** — all system events (dispatches, cloud operations, status changes) are logged to the database with full reporting queries (per-user, per-app, per-machine, jobs over time)
 - **Stats endpoint** — aggregated view of job counts by state and cluster resource utilisation
 - **User management** — create, update, and delete users with password authentication via admin API
 - **Password authentication** — users log in with user ID and password; receive a temporary API key
 - **API key management** — create, list, and revoke API keys; bind keys to users with role-based access (admin/user)
 - **Quotas** — enforce per-user and per-app limits on job count, RAM, cores, and concurrent jobs
-- **Web UI** — built-in single-page application with dark theme; dashboard, job management, and admin panels for users, keys, quotas, and apps
+- **Web UI** — built-in single-page application with dark theme; dashboard, job management, reporting charts, machine status grid, and admin panels
+- **Bastion mode** — disable the web UI entirely (`web_ui_enabled = 0`) while keeping the REST API accessible; useful for headless or API-only deployments
+- **Machine availability probing** — background thread checks whether static machines are reachable via TCP, ping, or SSH; offline machines are automatically excluded from scheduling
+- **Cloud provisioning** — provision and deprovision VMs on AWS, GCP, and Azure on-demand via their CLI tools; instances are auto-registered in the machine pool
+- **Cloud auto-scaling** — automatically spin up a cloud VM when no machine can satisfy a job’s requirements, and tear it down when the job finishes
+- **Wake-on-LAN** — send WoL magic packets to power on on-premise machines remotely; triggered via API or the web UI
 - **Auto-cleanup** — work directories are deleted automatically after a configurable TTL
 - **Bulk purge** — single call to delete all finished/failed/cancelled jobs and their work directories
 - **Cross-platform** — runs as a Windows Service or Linux daemon

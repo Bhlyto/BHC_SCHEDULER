@@ -13,7 +13,17 @@ void config_defaults(void)
     g_config.scheduler_poll_ms    = 500;
     g_config.job_timeout_seconds  = 0;
     strncpy(g_config.ssh_remote_work_dir, "/tmp/orch", sizeof(g_config.ssh_remote_work_dir)-1);
+    strncpy(g_config.command_mode,       "free",      sizeof(g_config.command_mode)-1);
     strncpy(g_config.log_level,         "info",                       sizeof(g_config.log_level)-1);
+    g_config.web_ui_enabled = 1;
+    strncpy(g_config.listen_address, "0.0.0.0", sizeof(g_config.listen_address)-1);
+    strncpy(g_config.probe_method, "tcp", sizeof(g_config.probe_method)-1);
+    g_config.probe_port        = 22;
+    g_config.probe_timeout_ms  = 3000;
+    g_config.probe_retries     = 2;
+    g_config.probe_interval_ms = 60000;
+    g_config.cloud_auto_provision   = 0;
+    g_config.cloud_auto_deprovision = 0;
 #ifdef _WIN32
     strncpy(g_config.apps_dir,          "config\\apps",                sizeof(g_config.apps_dir)-1);
     strncpy(g_config.work_dir,          "jobs",                       sizeof(g_config.work_dir)-1);
@@ -78,6 +88,22 @@ int config_load(const char *path)
         else if (strcmp(key, "apps_dir")               == 0) strncpy(g_config.apps_dir,              val, sizeof(g_config.apps_dir)-1);
         else if (strcmp(key, "temp_dir")               == 0) strncpy(g_config.temp_dir,              val, sizeof(g_config.temp_dir)-1);
         else if (strcmp(key, "pid_file")               == 0) strncpy(g_config.pid_file,              val, sizeof(g_config.pid_file)-1);
+        else if (strcmp(key, "ssh_shell")              == 0) strncpy(g_config.ssh_shell,             val, sizeof(g_config.ssh_shell)-1);
+        else if (strcmp(key, "command_mode")           == 0) strncpy(g_config.command_mode,          val, sizeof(g_config.command_mode)-1);
+        else if (strcmp(key, "web_ui_enabled")         == 0) g_config.web_ui_enabled                = atoi(val);
+        else if (strcmp(key, "listen_address")         == 0) strncpy(g_config.listen_address,        val, sizeof(g_config.listen_address)-1);
+        else if (strcmp(key, "probe_method")           == 0) strncpy(g_config.probe_method,          val, sizeof(g_config.probe_method)-1);
+        else if (strcmp(key, "probe_port")             == 0) g_config.probe_port                    = atoi(val);
+        else if (strcmp(key, "probe_timeout_ms")       == 0) g_config.probe_timeout_ms              = atoi(val);
+        else if (strcmp(key, "probe_retries")          == 0) g_config.probe_retries                 = atoi(val);
+        else if (strcmp(key, "probe_interval_ms")      == 0) g_config.probe_interval_ms             = atoi(val);
+        else if (strcmp(key, "cloud_credentials_file") == 0) strncpy(g_config.cloud_credentials_file, val, sizeof(g_config.cloud_credentials_file)-1);
+        else if (strcmp(key, "cloud_auto_provision")   == 0) g_config.cloud_auto_provision   = atoi(val);
+        else if (strcmp(key, "cloud_auto_deprovision") == 0) g_config.cloud_auto_deprovision = atoi(val);
+        else if (strcmp(key, "cloud_default_provider")      == 0) strncpy(g_config.cloud_default_provider,      val, sizeof(g_config.cloud_default_provider)-1);
+        else if (strcmp(key, "cloud_default_instance_type") == 0) strncpy(g_config.cloud_default_instance_type, val, sizeof(g_config.cloud_default_instance_type)-1);
+        else if (strcmp(key, "cloud_default_region")        == 0) strncpy(g_config.cloud_default_region,        val, sizeof(g_config.cloud_default_region)-1);
+        else if (strcmp(key, "cloud_default_image_id")      == 0) strncpy(g_config.cloud_default_image_id,      val, sizeof(g_config.cloud_default_image_id)-1);
         else fprintf(stderr, "[config] Unknown key: %s\n", key);
     }
     fclose(f);

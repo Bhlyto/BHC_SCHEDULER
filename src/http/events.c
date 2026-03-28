@@ -1,5 +1,7 @@
 #include "events.h"
+#include "db.h"
 #include <string.h>
+#include <stdio.h>
 
 /*
  * events.c
@@ -60,4 +62,21 @@ int events_drain(char out[][EVENTS_JSON_MAX], int max)
     s_count -= n;
     EVT_UNLOCK();
     return n;
+}
+
+void events_push_persistent(const char *category, const char *event_type,
+                            const char *detail, const char *user_id)
+{
+    /* Persist to DB */
+    db_insert_event(category, event_type, detail, user_id, "", "");
+
+    /* Also push to ring buffer for live SSE */
+    char json[EVENTS_JSON_MAX];
+    snprintf(json, sizeof(json),
+        "{\"category\":\"%s\",\"type\":\"%s\",\"detail\":\"%s\",\"user\":\"%s\"}",
+        category ? category : "",
+        event_type ? event_type : "",
+        detail ? detail : "",
+        user_id ? user_id : "");
+    events_push(json);
 }

@@ -6,7 +6,7 @@
 #   .\tests\test_api.ps1 -BaseUrl http://192.168.1.10:8080
 
 param(
-    [string]$BaseUrl = "http://localhost:8080",
+    [string]$BaseUrl = "http://localhost:8099",
     [int]   $JobTimeoutSec = 15
 )
 
@@ -47,8 +47,18 @@ function ReqRaw($method, $path, $body = $null, $extraHeaders = $null) {
         $resp = Invoke-WebRequest @p
         return [pscustomobject]@{ StatusCode = [int]$resp.StatusCode; Content = $resp.Content }
     } catch {
-        $code = $_.Exception.Response.StatusCode.value__
-        return [pscustomobject]@{ StatusCode = [int]$code; Content = $_.ToString() }
+        $resp = $_.Exception.Response
+        $code = if ($resp) { [int]$resp.StatusCode } else { 0 }
+        $content = $_.ToString()
+        if ($resp -and $resp.ContentLength -gt 0) {
+            try {
+                $stream = $resp.GetResponseStream()
+                $reader = New-Object System.IO.StreamReader($stream)
+                $content = $reader.ReadToEnd()
+                $reader.Close()
+            } catch {}
+        }
+        return [pscustomobject]@{ StatusCode = $code; Content = $content }
     }
 }
 
@@ -85,6 +95,15 @@ else { Fail "Mauvaise cle -> 401" "code=$($r.StatusCode)" }
 $r = ReqRaw GET "/jobs"
 if ($r.StatusCode -eq 200) { Pass "Bonne cle -> 200 sur /jobs" }
 else { Fail "Bonne cle -> 200 sur /jobs" "code=$($r.StatusCode)" }
+
+# =============================================
+#  0. SETUP -- provision a local machine for tests
+# =============================================
+Write-Host "`n-- 0. Setup" -ForegroundColor Cyan
+
+$localMachine = '{"id":"local","hostname":"localhost","ip":"127.0.0.1","cores":8,"gpu_count":0,"ram_mb":16384,"disk_mb":102400}'
+$r = Req POST "/provision" $localMachine
+Check "Provision local machine"           "true|ok|already" ($r | ConvertTo-Json)
 
 # =============================================
 #  2. SOUMISSION / VALIDATION DE JOB
@@ -322,6 +341,145 @@ Check "DELETE /jobs -> cleaned field"  "[0-9]+" "$($r.cleaned)"
 # Confirm purged job is gone
 $gone = Req GET "/jobs/$($pj.id)"
 Check "Job purge -> absent (404)" "404|not.found|error" ($gone | ConvertTo-Json -Depth 5)
+
+# =============================================
+#  15. WORKFLOW -- FILE FORWARDING
+# =============================================
+Write-Host "`n-- 15. Workflow -- file forwarding (output -> input)" -ForegroundColor Cyan
+
+# Step 1: writes a file to ORCH_OUTPUT_DIR
+# Step 2: depends on step 1 and expects that file in ORCH_INPUT_DIR
+$wfBody = @{
+    name = "test-file-forward"
+    steps = @(
+        @{
+            command = 'echo file-forward-data > "%ORCH_OUTPUT_DIR%\result.txt"'
+            priority = 1
+            cores = 1
+            ram_mb = 64
+        },
+        @{
+            command = 'type "%ORCH_INPUT_DIR%\result.txt"'
+            priority = 1
+            cores = 1
+            ram_mb = 64
+            depends_on_steps = @(0)
+            input_files = @("result.txt")
+        }
+    )
+} | ConvertTo-Json -Depth 4
+
+$r = Req POST "/workflows/run" $wfBody
+Check "Workflow file-forward soumis"       "workflow_id" ($r | ConvertTo-Json -Depth 6)
+$wf_jobs = $r.jobs
+$wf_step1_id = $wf_jobs[0].id
+$wf_step2_id = $wf_jobs[1].id
+Check "Step 1 soumis"                      "[0-9a-f-]{36}" $wf_step1_id
+Check "Step 2 en HELD"                     "HELD" $wf_jobs[1].status
+
+# Wait for both to finish
+$r1 = WaitJob $wf_step1_id 30
+Check "Step 1 -> FINISHED"                "FINISHED" $r1.status
+
+$r2 = WaitJob $wf_step2_id 30
+Check "Step 2 -> FINISHED (file forwarded)" "FINISHED" $r2.status
+
+# Verify step 2 stdout contains the forwarded data
+$r = ReqRaw GET "/jobs/$wf_step2_id/log"
+if ($r.StatusCode -eq 200 -and $r.Content -match "file-forward-data") {
+    Pass "Step 2 stdout contient les donnees du fichier forward"
+} else {
+    Fail "Step 2 stdout contient les donnees" "code=$($r.StatusCode) content=$($r.Content)"
+}
+
+# =============================================
+#  16. WORKFLOW -- SAME-MACHINE AFFINITY
+# =============================================
+Write-Host "`n-- 16. Workflow -- same-machine affinity" -ForegroundColor Cyan
+
+$wfBody2 = @{
+    name = "test-same-machine"
+    steps = @(
+        @{
+            command = "echo step1-machine"
+            priority = 1
+            cores = 1
+            ram_mb = 64
+        },
+        @{
+            command = "echo step2-same-machine"
+            priority = 1
+            cores = 1
+            ram_mb = 64
+            depends_on_steps = @(0)
+            same_machine = $true
+        }
+    )
+} | ConvertTo-Json -Depth 4
+
+$r = Req POST "/workflows/run" $wfBody2
+Check "Workflow same-machine soumis"       "workflow_id" ($r | ConvertTo-Json -Depth 6)
+$sm_jobs = $r.jobs
+$sm_step1_id = $sm_jobs[0].id
+$sm_step2_id = $sm_jobs[1].id
+Check "Step 2 has same_machine_as set"     $sm_step1_id $sm_jobs[1].same_machine_as
+
+$r1 = WaitJob $sm_step1_id 20
+Check "Same-machine step 1 -> FINISHED"   "FINISHED" $r1.status
+$machine1 = $r1.machine_id
+
+$r2 = WaitJob $sm_step2_id 20
+Check "Same-machine step 2 -> FINISHED"   "FINISHED" $r2.status
+$machine2 = $r2.machine_id
+
+if ($machine1 -and $machine2 -and $machine1 -eq $machine2) {
+    Pass "Step 2 execute sur la meme machine ($machine2)"
+} else {
+    Fail "Step 2 sur meme machine" "step1=$machine1 step2=$machine2"
+}
+
+# =============================================
+#  17. WORKFLOW -- CHAIN 3 STEPS WITH FORWARDING
+# =============================================
+Write-Host "`n-- 17. Workflow -- chaine 3 etapes" -ForegroundColor Cyan
+
+$wfBody3 = @{
+    name = "test-3step-chain"
+    steps = @(
+        @{
+            command = 'echo chain-start > "%ORCH_OUTPUT_DIR%\chain.txt"'
+            priority = 1; cores = 1; ram_mb = 64
+        },
+        @{
+            command = 'type "%ORCH_INPUT_DIR%\chain.txt" & echo chain-middle >> "%ORCH_OUTPUT_DIR%\chain.txt"'
+            priority = 1; cores = 1; ram_mb = 64
+            depends_on_steps = @(0)
+            input_files = @("chain.txt")
+        },
+        @{
+            command = 'type "%ORCH_INPUT_DIR%\chain.txt"'
+            priority = 1; cores = 1; ram_mb = 64
+            depends_on_steps = @(1)
+            input_files = @("chain.txt")
+            same_machine = $true
+        }
+    )
+} | ConvertTo-Json -Depth 4
+
+$r = Req POST "/workflows/run" $wfBody3
+Check "Workflow 3-step chain soumis"       "workflow_id" ($r | ConvertTo-Json -Depth 6)
+$ch_jobs = $r.jobs
+$ch3_id = $ch_jobs[2].id
+
+$r3 = WaitJob $ch3_id 45
+Check "Step 3 -> FINISHED"               "FINISHED" $r3.status
+
+$r = ReqRaw GET "/jobs/$ch3_id/log"
+if ($r.StatusCode -eq 200 -and $r.Content -match "chain-middle") {
+    Pass "Step 3 recoit le fichier avec donnees de step 2"
+} else {
+    Fail "Step 3 fichier chain" "code=$($r.StatusCode) content=$($r.Content)"
+}
 
 # =============================================
 #  RESULTAT FINAL

@@ -54,6 +54,22 @@ int registry_load(const char *json_path)
         GET_INT(ram_mb_total,    "ram_mb");
         GET_INT(disk_mb_total,   "disk_mb");
 
+        /* New fields */
+        GET_STR(mac_address,       "mac_address");
+        GET_STR(cloud_provider,    "cloud_provider");
+        GET_STR(cloud_instance_id, "cloud_instance_id");
+        GET_INT(cores_min,  "cores_min");
+        GET_INT(ram_mb_min, "ram_mb_min");
+        GET_INT(disk_mb_min,"disk_mb_min");
+
+        cJSON *j_type = cJSON_GetObjectItemCaseSensitive(m, "type");
+        if (cJSON_IsString(j_type) && strcmp(j_type->valuestring, "cloud") == 0)
+            M->type = MACHINE_TYPE_CLOUD;
+        else
+            M->type = MACHINE_TYPE_STATIC;
+
+        M->probe_status = MACHINE_ONLINE; /* assume online until probed */
+
         M->enabled = 1; /* default enabled */
         cJSON *en = cJSON_GetObjectItemCaseSensitive(m, "enabled");
         if (cJSON_IsBool(en)) M->enabled = cJSON_IsTrue(en) ? 1 : 0;
@@ -122,6 +138,8 @@ int registry_load(const char *json_path)
                 M->gpu_count_total = pool_gpu;
                 M->ram_mb_total    = pool_ram;
                 M->disk_mb_total   = pool_disk;
+                M->type            = MACHINE_TYPE_STATIC;
+                M->probe_status    = MACHINE_ONLINE;
                 s_count++;
             }
 

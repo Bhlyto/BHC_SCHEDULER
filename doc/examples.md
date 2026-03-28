@@ -91,4 +91,82 @@ Invoke-RestMethod -Uri "$base/provision" -Method POST -Headers $headers -Body $m
 
 # Remove a machine
 Invoke-RestMethod -Uri "$base/provision/srv-03" -Method DELETE -Headers $headers
+
+# ── Events & Reporting (admin) ───────────────────
+# List recent events
+Invoke-RestMethod -Uri "$base/admin/events?limit=50" -Method GET -Headers $headers
+
+# List events filtered by category and time range
+$from = [int](Get-Date "2025-03-01").ToUniversalTime().Subtract([datetime]"1970-01-01").TotalSeconds
+$to   = [int](Get-Date).ToUniversalTime().Subtract([datetime]"1970-01-01").TotalSeconds
+Invoke-RestMethod -Uri "$base/admin/events?category=job&from=$from&to=$to" -Method GET -Headers $headers
+
+# Jobs-over-time report (daily granularity)
+Invoke-RestMethod -Uri "$base/admin/reports/jobs?granularity=day&from=$from&to=$to" -Method GET -Headers $headers
+
+# Per-user report
+Invoke-RestMethod -Uri "$base/admin/reports/users?from=$from&to=$to" -Method GET -Headers $headers
+
+# Per-application report
+Invoke-RestMethod -Uri "$base/admin/reports/apps" -Method GET -Headers $headers
+
+# Per-machine report
+Invoke-RestMethod -Uri "$base/admin/reports/machines" -Method GET -Headers $headers
+
+# ── Machine Status (admin) ───────────────────────
+# Full machine status grid (probe status, type, MAC, etc.)
+Invoke-RestMethod -Uri "$base/admin/machines/status" -Method GET -Headers $headers
+
+# ── Cloud Provisioning (admin) ───────────────────
+# Provision an AWS EC2 instance
+$spec = @{
+    provider      = "aws"
+    instance_type = "t3.xlarge"
+    region        = "eu-west-1"
+    image_id      = "ami-0abcdef1234567890"
+    cores         = 4
+    ram_mb        = 16384
+    disk_mb       = 100000
+    cores_min     = 2
+    ram_mb_min    = 8192
+    disk_mb_min   = 50000
+} | ConvertTo-Json
+Invoke-RestMethod -Uri "$base/admin/cloud/provision" -Method POST -Headers $headers -Body $spec
+
+# Provision a GCP instance
+$spec = @{
+    provider      = "gcp"
+    instance_type = "e2-standard-4"
+    region        = "us-central1-a"
+    image_id      = "debian-11"
+    cores         = 4
+    ram_mb        = 16384
+    disk_mb       = 50000
+} | ConvertTo-Json
+Invoke-RestMethod -Uri "$base/admin/cloud/provision" -Method POST -Headers $headers -Body $spec
+
+# Provision an Azure VM
+$spec = @{
+    provider      = "azure"
+    instance_type = "Standard_B2s"
+    region        = "westeurope"
+    image_id      = "UbuntuLTS"
+    cores         = 2
+    ram_mb        = 4096
+    disk_mb       = 30000
+} | ConvertTo-Json
+Invoke-RestMethod -Uri "$base/admin/cloud/provision" -Method POST -Headers $headers -Body $spec
+
+# Deprovision a cloud instance
+$body = '{"provider":"aws","instance_id":"i-0abc123def456"}'
+Invoke-RestMethod -Uri "$base/admin/cloud/deprovision" -Method POST -Headers $headers -Body $body
+
+# ── Wake-on-LAN (admin) ─────────────────────────
+# Wake a machine by its ID
+$body = '{"machine_id":"srv-01"}'
+Invoke-RestMethod -Uri "$base/admin/wol" -Method POST -Headers $headers -Body $body
+
+# Wake with a specific broadcast address
+$body = '{"machine_id":"srv-01","broadcast_ip":"192.168.1.255"}'
+Invoke-RestMethod -Uri "$base/admin/wol" -Method POST -Headers $headers -Body $body
 ```

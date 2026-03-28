@@ -63,13 +63,28 @@ void orchestrator_run(void)
     scheduler_start();
     log_info("main", "Scheduler started");
 
+    /* ── Start background probe thread ────────────────────────── */
+    {
+        ProbeMethod pm = PROBE_TCP;
+        if (strcmp(g_config.probe_method, "ping") == 0) pm = PROBE_PING;
+        else if (strcmp(g_config.probe_method, "ssh") == 0) pm = PROBE_SSH;
+        probe_start_background(g_config.probe_interval_ms, pm,
+                               g_config.probe_port, g_config.probe_timeout_ms,
+                               g_config.probe_retries);
+        log_info("main", "Probe thread started (method=%s, interval=%dms)",
+                 g_config.probe_method, g_config.probe_interval_ms);
+    }
+
     if (httpd_start(g_config.listen_port) != 0) {
         log_error("main", "Failed to start HTTP server on port %d", g_config.listen_port);
         scheduler_stop();
         db_close();
         return;
     }
-    log_info("main", "HTTP API listening on port %d", g_config.listen_port);
+    log_info("main", "HTTP API listening on %s:%d%s",
+             g_config.listen_address[0] ? g_config.listen_address : "0.0.0.0",
+             g_config.listen_port,
+             g_config.web_ui_enabled ? "" : " (API-only / bastion mode)");
     log_info("main", "Ready. Send jobs to POST http://localhost:%d/jobs", g_config.listen_port);
 
     while (!platform_stop_requested())
@@ -77,6 +92,7 @@ void orchestrator_run(void)
 
     log_info("main", "Shutting down …");
     httpd_stop();
+    probe_stop_background();
     scheduler_stop();
     db_close();
     log_info("main", "Shutdown complete");

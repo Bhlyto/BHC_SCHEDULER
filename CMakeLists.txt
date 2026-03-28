@@ -59,6 +59,7 @@ set(CORE_SOURCES
     src/http/response.c
     src/http/httpd.c
     src/http/events.c
+    src/cloud/cloud.c
 )
 
 # ──────────────────────────────────────────────

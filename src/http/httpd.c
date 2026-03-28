@@ -11,22 +11,38 @@ static int           s_running = 0;
 
 
 #define SSE_MAX_CONNS 32
-static struct mg_connection *s_sse[SSE_MAX_CONNS];
+
+typedef struct {
+    struct mg_connection *conn;
+    char user_id[128];
+    char role[16];
+} SseClient;
+
+static SseClient s_sse[SSE_MAX_CONNS];
 static int s_sse_count = 0;
 
 void httpd_sse_add(struct mg_connection *c)
 {
-    if (s_sse_count < SSE_MAX_CONNS)
-        s_sse[s_sse_count++] = c;
+    httpd_sse_add_user(c, "", "admin");  /* fallback for legacy calls */
+}
+
+void httpd_sse_add_user(struct mg_connection *c, const char *user_id, const char *role)
+{
+    if (s_sse_count < SSE_MAX_CONNS) {
+        s_sse[s_sse_count].conn = c;
+        strncpy(s_sse[s_sse_count].user_id, user_id ? user_id : "", sizeof(s_sse[0].user_id) - 1);
+        strncpy(s_sse[s_sse_count].role, role ? role : "user", sizeof(s_sse[0].role) - 1);
+        s_sse_count++;
+    }
 }
 
 static void sse_broadcast(const char *json)
 {
     for (int i = 0; i < s_sse_count; ) {
-        if (s_sse[i]->is_closing || s_sse[i]->is_draining) {
+        if (s_sse[i].conn->is_closing || s_sse[i].conn->is_draining) {
             s_sse[i] = s_sse[--s_sse_count];
         } else {
-            mg_printf(s_sse[i], "data: %s\n\n", json);
+            mg_printf(s_sse[i].conn, "data: %s\n\n", json);
             i++;
         }
     }
@@ -35,10 +51,10 @@ static void sse_broadcast(const char *json)
 static void sse_heartbeat(void)
 {
     for (int i = 0; i < s_sse_count; ) {
-        if (s_sse[i]->is_closing || s_sse[i]->is_draining) {
+        if (s_sse[i].conn->is_closing || s_sse[i].conn->is_draining) {
             s_sse[i] = s_sse[--s_sse_count];
         } else {
-            mg_printf(s_sse[i], ": keepalive\n\n");
+            mg_printf(s_sse[i].conn, ": keepalive\n\n");
             i++;
         }
     }
@@ -53,8 +69,10 @@ static void *http_thread(void *arg)
 #endif
 {
     (void)arg;
-    char addr[64];
-    snprintf(addr, sizeof(addr), "http://0.0.0.0:%d", g_config.listen_port);
+    char addr[128];
+    snprintf(addr, sizeof(addr), "http://%s:%d",
+             g_config.listen_address[0] ? g_config.listen_address : "0.0.0.0",
+             g_config.listen_port);
 
     mg_mgr_init(&s_mgr);
     struct mg_connection *conn = mg_http_listen(&s_mgr, addr, routes_handler, NULL);

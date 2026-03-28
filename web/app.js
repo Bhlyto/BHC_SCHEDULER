@@ -52,7 +52,7 @@ function fmtDate(ts) {
   return new Date(ts * 1000).toLocaleString();
 }
 function statusBadge(s) {
-  const cls = { RUNNING:'running', QUEUED:'queued', FINISHED:'finished', FAILED:'failed',
+  const cls = { RUNNING:'running', IN_QUEUE:'queued', QUEUED:'queued', FINISHED:'finished', FAILED:'failed',
                 HELD:'held', CANCELLED:'cancelled', STARTING:'starting' }[s] || 'queued';
   return '<span class="badge badge-' + cls + '">' + s + '</span>';
 }
@@ -127,6 +127,9 @@ async function enterApp() {
   });
   /* Pre-load apps list */
   try { APPS_CACHE = await api('GET', '/apps'); } catch { APPS_CACHE = []; }
+  /* Initialize reports module with API key */
+  if (window.reportsSetApiKey) reportsSetApiKey(API_KEY);
+  if (window.initReports) initReports();
   switchTab('dashboard');
   startAutoRefresh();
 }
@@ -165,6 +168,9 @@ function refreshCurrentTab() {
   if (_currentTab === 'keys') loadKeys();
   if (_currentTab === 'quotas') loadQuotas();
   if (_currentTab === 'apps') loadApps();
+  if (_currentTab === 'workflows') loadWorkflowTab();
+  if (_currentTab === 'reports' && window.loadAllReports) loadAllReports();
+  if (_currentTab === 'machines' && window.loadMachineStatus) loadMachineStatus();
 }
 
 /* ── Auto-refresh ─────────────────────────────── */

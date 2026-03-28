@@ -74,7 +74,36 @@ static const char *SCHEMA =
     "  password_hash TEXT NOT NULL DEFAULT '',"
     "  enabled       INTEGER NOT NULL DEFAULT 1,"
     "  created_at    INTEGER NOT NULL DEFAULT 0"
-    ");";
+    ");"
+
+    "CREATE TABLE IF NOT EXISTS workflows ("
+    "  id          TEXT PRIMARY KEY,"
+    "  name        TEXT NOT NULL DEFAULT '',"
+    "  owner_id    TEXT NOT NULL DEFAULT '',"
+    "  is_global   INTEGER NOT NULL DEFAULT 0,"
+    "  steps_json  TEXT NOT NULL DEFAULT '[]',"
+    "  created_at  INTEGER NOT NULL DEFAULT 0,"
+    "  updated_at  INTEGER NOT NULL DEFAULT 0"
+    ");"
+
+    "CREATE TABLE IF NOT EXISTS workflow_favorites ("
+    "  user_id     TEXT NOT NULL,"
+    "  workflow_id TEXT NOT NULL,"
+    "  PRIMARY KEY (user_id, workflow_id)"
+    ");"
+
+    "CREATE TABLE IF NOT EXISTS events ("
+    "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  category    TEXT NOT NULL DEFAULT '',"
+    "  event_type  TEXT NOT NULL DEFAULT '',"
+    "  detail      TEXT NOT NULL DEFAULT '',"
+    "  user_id     TEXT NOT NULL DEFAULT '',"
+    "  job_id      TEXT NOT NULL DEFAULT '',"
+    "  machine_id  TEXT NOT NULL DEFAULT '',"
+    "  created_at  INTEGER NOT NULL DEFAULT 0"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_events_cat ON events(category, created_at);"
+    "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(created_at);";
 
 int db_open(const char *path)
 {
@@ -119,6 +148,18 @@ int db_open(const char *path)
     sqlite3_exec(s_db,
         "ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT '';",
         NULL, NULL, NULL);
+    /* depends_on migration */
+    sqlite3_exec(s_db,
+        "ALTER TABLE jobs ADD COLUMN depends_on TEXT NOT NULL DEFAULT '';",
+        NULL, NULL, NULL);
+    /* workflow_id migration */
+    sqlite3_exec(s_db,
+        "ALTER TABLE jobs ADD COLUMN workflow_id TEXT NOT NULL DEFAULT '';",
+        NULL, NULL, NULL);
+    /* same_machine_as migration */
+    sqlite3_exec(s_db,
+        "ALTER TABLE jobs ADD COLUMN same_machine_as TEXT NOT NULL DEFAULT '';",
+        NULL, NULL, NULL);
     return 0;
 }
 
@@ -133,8 +174,8 @@ int db_insert_job(const Job *job)
         "INSERT INTO jobs(id,command,status,priority,"
         "req_cores,req_gpu,req_ram_mb,req_disk_mb,"
         "input_dir,output_dir,submitted_at,input_files,timeout_seconds,"
-        "user_id,app_id)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+        "user_id,app_id,depends_on,workflow_id,same_machine_as)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(st, 1, job->id, -1, SQLITE_STATIC);
@@ -152,6 +193,9 @@ int db_insert_job(const Job *job)
     sqlite3_bind_int (st, 13, job->timeout_seconds);
     sqlite3_bind_text(st, 14, job->user_id,         -1, SQLITE_STATIC);
     sqlite3_bind_text(st, 15, job->app_id,          -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 16, job->depends_on,      -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 17, job->workflow_id,     -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 18, job->same_machine_as, -1, SQLITE_STATIC);
     int rc = sqlite3_step(st);
     sqlite3_finalize(st);
     return (rc == SQLITE_DONE) ? 0 : -1;
@@ -213,6 +257,9 @@ static Job *row_to_job(sqlite3_stmt *st)
     s = (const char *)sqlite3_column_text(st, 17); if (s) strncpy(job->status_reason, s, sizeof(job->status_reason)-1);
     s = (const char *)sqlite3_column_text(st, 18); if (s) strncpy(job->user_id, s, sizeof(job->user_id)-1);
     s = (const char *)sqlite3_column_text(st, 19); if (s) strncpy(job->app_id,  s, sizeof(job->app_id)-1);
+    s = (const char *)sqlite3_column_text(st, 20); if (s) strncpy(job->depends_on, s, sizeof(job->depends_on)-1);
+    s = (const char *)sqlite3_column_text(st, 21); if (s) strncpy(job->workflow_id, s, sizeof(job->workflow_id)-1);
+    s = (const char *)sqlite3_column_text(st, 22); if (s) strncpy(job->same_machine_as, s, sizeof(job->same_machine_as)-1);
     return job;
 }
 
@@ -222,7 +269,7 @@ Job *db_get_job(const char *job_id)
         "SELECT id,command,status,priority,req_cores,req_gpu,req_ram_mb,"
         "req_disk_mb,machine_id,input_dir,output_dir,exit_code,"
         "submitted_at,started_at,ended_at,input_files,timeout_seconds,status_reason,"
-        "user_id,app_id FROM jobs WHERE id=?;";
+        "user_id,app_id,depends_on,workflow_id,same_machine_as FROM jobs WHERE id=?;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return NULL;
     sqlite3_bind_text(st, 1, job_id, -1, SQLITE_STATIC);
@@ -238,7 +285,7 @@ int db_list_jobs(Job *jobs, int max_count)
         "SELECT id,command,status,priority,req_cores,req_gpu,req_ram_mb,"
         "req_disk_mb,machine_id,input_dir,output_dir,exit_code,"
         "submitted_at,started_at,ended_at,input_files,timeout_seconds,status_reason,"
-        "user_id,app_id FROM jobs ORDER BY submitted_at DESC LIMIT ?;";
+        "user_id,app_id,depends_on,workflow_id,same_machine_as FROM jobs ORDER BY submitted_at DESC LIMIT ?;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_int(st, 1, max_count);
@@ -257,7 +304,7 @@ int db_list_held_jobs(Job *jobs, int max_count)
         "SELECT id,command,status,priority,req_cores,req_gpu,req_ram_mb,"
         "req_disk_mb,machine_id,input_dir,output_dir,exit_code,"
         "submitted_at,started_at,ended_at,input_files,timeout_seconds,status_reason,"
-        "user_id,app_id FROM jobs WHERE status=6 AND input_files!='' ORDER BY submitted_at ASC LIMIT ?;";
+        "user_id,app_id,depends_on,workflow_id,same_machine_as FROM jobs WHERE status=6 ORDER BY submitted_at ASC LIMIT ?;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_int(st, 1, max_count);
@@ -276,7 +323,7 @@ int db_list_running_jobs(Job *jobs, int max_count)
         "SELECT id,command,status,priority,req_cores,req_gpu,req_ram_mb,"
         "req_disk_mb,machine_id,input_dir,output_dir,exit_code,"
         "submitted_at,started_at,ended_at,input_files,timeout_seconds,status_reason,"
-        "user_id,app_id FROM jobs WHERE status IN (1,2) ORDER BY started_at ASC LIMIT ?;";
+        "user_id,app_id,depends_on,workflow_id,same_machine_as FROM jobs WHERE status IN (1,2) ORDER BY started_at ASC LIMIT ?;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_int(st, 1, max_count);
@@ -457,6 +504,78 @@ int db_update_job_timeout(const char *job_id, int timeout_seconds)
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+int db_update_depends_on(const char *job_id, const char *depends_on)
+{
+    const char *sql = "UPDATE jobs SET depends_on=? WHERE id=?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, depends_on, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, job_id,     -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_update_workflow_id(const char *job_id, const char *workflow_id)
+{
+    const char *sql = "UPDATE jobs SET workflow_id=? WHERE id=?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, workflow_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, job_id,      -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_update_same_machine_as(const char *job_id, const char *ref_id)
+{
+    const char *sql = "UPDATE jobs SET same_machine_as=? WHERE id=?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, ref_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, job_id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_check_deps_status(const char *depends_on_csv)
+{
+    if (!depends_on_csv || !depends_on_csv[0]) return 0; /* no deps = ready */
+
+    char buf[2048];
+    strncpy(buf, depends_on_csv, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *tok = strtok(buf, ",");
+    while (tok) {
+        while (*tok == ' ') tok++;
+        int tlen = (int)strlen(tok);
+        while (tlen > 0 && tok[tlen-1] == ' ') tok[--tlen] = '\0';
+        if (!tok[0]) { tok = strtok(NULL, ","); continue; }
+
+        const char *sql = "SELECT status FROM jobs WHERE id=?;";
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK)
+            return 1; /* can't check, assume waiting */
+        sqlite3_bind_text(st, 1, tok, -1, SQLITE_STATIC);
+        int status = -99;
+        if (sqlite3_step(st) == SQLITE_ROW)
+            status = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+
+        if (status == -99) return -1; /* dep not found = error */
+        if (status == JOB_STATUS_FAILED || status == JOB_STATUS_CANCELLED)
+            return -1; /* dep failed */
+        if (status != JOB_STATUS_FINISHED)
+            return 1; /* still waiting */
+
+        tok = strtok(NULL, ",");
+    }
+    return 0; /* all deps finished */
+}
+
 int db_update_status_reason(const char *job_id, const char *reason)
 {
     const char *sql = "UPDATE jobs SET status_reason=? WHERE id=?;";
@@ -592,6 +711,25 @@ int db_check_user_password(const char *user_id, const char *password_hash)
     if (sqlite3_step(st) == SQLITE_ROW) {
         int enabled = sqlite3_column_int(st, 0);
         result = enabled ? 0 : -2; /* -2 = account disabled */
+    }
+    sqlite3_finalize(st);
+    return result;
+}
+
+int db_get_user_auth(const char *user_id, char *out_hash, int hash_len,
+                     int *out_enabled)
+{
+    const char *sql = "SELECT password_hash, enabled FROM users WHERE user_id=?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, user_id, -1, SQLITE_STATIC);
+    int result = -1;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *h = (const char *)sqlite3_column_text(st, 0);
+        if (h) strncpy(out_hash, h, hash_len - 1);
+        out_hash[hash_len - 1] = '\0';
+        *out_enabled = sqlite3_column_int(st, 1);
+        result = 0;
     }
     sqlite3_finalize(st);
     return result;
@@ -875,4 +1013,408 @@ int db_quota_check(const char *user_id, const char *app_id,
     }
 
     return 0;
+}
+
+/* ── Workflows ─────────────────────────────────── */
+
+int db_insert_workflow(const WorkflowDef *w)
+{
+    const char *sql =
+        "INSERT INTO workflows(id,name,owner_id,is_global,steps_json,created_at,updated_at)"
+        " VALUES(?,?,?,?,?,?,?);";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, w->id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, w->name, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, w->owner_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 4, w->is_global);
+    sqlite3_bind_text(st, 5, w->steps_json, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 6, (sqlite3_int64)w->created_at);
+    sqlite3_bind_int64(st, 7, (sqlite3_int64)w->updated_at);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int db_update_workflow(const WorkflowDef *w)
+{
+    const char *sql =
+        "UPDATE workflows SET name=?,is_global=?,steps_json=?,updated_at=? WHERE id=?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, w->name, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 2, w->is_global);
+    sqlite3_bind_text(st, 3, w->steps_json, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 4, (sqlite3_int64)w->updated_at);
+    sqlite3_bind_text(st, 5, w->id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int db_delete_workflow(const char *wf_id)
+{
+    const char *sql = "DELETE FROM workflows WHERE id=?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, wf_id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    /* Also clean up favorites */
+    sqlite3_stmt *st2;
+    if (sqlite3_prepare_v2(s_db,
+        "DELETE FROM workflow_favorites WHERE workflow_id=?;", -1, &st2, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st2, 1, wf_id, -1, SQLITE_STATIC);
+        sqlite3_step(st2);
+        sqlite3_finalize(st2);
+    }
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int db_get_workflow(const char *wf_id, WorkflowDef *out)
+{
+    const char *sql =
+        "SELECT id,name,owner_id,is_global,steps_json,created_at,updated_at"
+        " FROM workflows WHERE id=?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, wf_id, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) != SQLITE_ROW) { sqlite3_finalize(st); return -1; }
+    memset(out, 0, sizeof(*out));
+    strncpy(out->id,         (const char*)sqlite3_column_text(st, 0), sizeof(out->id)-1);
+    strncpy(out->name,       (const char*)sqlite3_column_text(st, 1), sizeof(out->name)-1);
+    strncpy(out->owner_id,   (const char*)sqlite3_column_text(st, 2), sizeof(out->owner_id)-1);
+    out->is_global = sqlite3_column_int(st, 3);
+    strncpy(out->steps_json, (const char*)sqlite3_column_text(st, 4), sizeof(out->steps_json)-1);
+    out->created_at = (time_t)sqlite3_column_int64(st, 5);
+    out->updated_at = (time_t)sqlite3_column_int64(st, 6);
+    sqlite3_finalize(st);
+    return 0;
+}
+
+int db_list_workflows(const char *user_id, WorkflowDef *out, int max_count)
+{
+    /* If user_id is empty, return ALL workflows (admin mode) */
+    const char *sql_all =
+        "SELECT id,name,owner_id,is_global,steps_json,created_at,updated_at"
+        " FROM workflows ORDER BY updated_at DESC;";
+    /* Otherwise return workflows owned by user OR global ones */
+    const char *sql_user =
+        "SELECT id,name,owner_id,is_global,steps_json,created_at,updated_at"
+        " FROM workflows WHERE owner_id=? OR is_global=1"
+        " ORDER BY updated_at DESC;";
+
+    int is_admin_list = (!user_id || !user_id[0]);
+    sqlite3_stmt *st;
+    if (is_admin_list) {
+        if (sqlite3_prepare_v2(s_db, sql_all, -1, &st, NULL) != SQLITE_OK) return 0;
+    } else {
+        if (sqlite3_prepare_v2(s_db, sql_user, -1, &st, NULL) != SQLITE_OK) return 0;
+        sqlite3_bind_text(st, 1, user_id, -1, SQLITE_STATIC);
+    }
+    int i = 0;
+    while (i < max_count && sqlite3_step(st) == SQLITE_ROW) {
+        memset(&out[i], 0, sizeof(out[i]));
+        strncpy(out[i].id,         (const char*)sqlite3_column_text(st, 0), sizeof(out[i].id)-1);
+        strncpy(out[i].name,       (const char*)sqlite3_column_text(st, 1), sizeof(out[i].name)-1);
+        strncpy(out[i].owner_id,   (const char*)sqlite3_column_text(st, 2), sizeof(out[i].owner_id)-1);
+        out[i].is_global = sqlite3_column_int(st, 3);
+        strncpy(out[i].steps_json, (const char*)sqlite3_column_text(st, 4), sizeof(out[i].steps_json)-1);
+        out[i].created_at = (time_t)sqlite3_column_int64(st, 5);
+        out[i].updated_at = (time_t)sqlite3_column_int64(st, 6);
+        i++;
+    }
+    sqlite3_finalize(st);
+    return i;
+}
+
+/* ── Workflow Favorites ────────────────────────── */
+
+int db_add_workflow_favorite(const char *user_id, const char *wf_id)
+{
+    const char *sql =
+        "INSERT OR IGNORE INTO workflow_favorites(user_id,workflow_id) VALUES(?,?);";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, user_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, wf_id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int db_remove_workflow_favorite(const char *user_id, const char *wf_id)
+{
+    const char *sql =
+        "DELETE FROM workflow_favorites WHERE user_id=? AND workflow_id=?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, user_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, wf_id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int db_is_workflow_favorite(const char *user_id, const char *wf_id)
+{
+    const char *sql =
+        "SELECT 1 FROM workflow_favorites WHERE user_id=? AND workflow_id=?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, user_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, wf_id, -1, SQLITE_STATIC);
+    int found = (sqlite3_step(st) == SQLITE_ROW);
+    sqlite3_finalize(st);
+    return found;
+}
+
+/* ── Persistent Events ────────────────────────────────────────────── */
+
+int db_insert_event(const char *category, const char *event_type,
+                    const char *detail, const char *user_id,
+                    const char *job_id, const char *machine_id)
+{
+    const char *sql =
+        "INSERT INTO events(category,event_type,detail,user_id,job_id,machine_id,created_at)"
+        " VALUES(?,?,?,?,?,?,strftime('%s','now'));";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, category   ? category   : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, event_type ? event_type : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, detail     ? detail     : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, user_id    ? user_id    : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 5, job_id     ? job_id     : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 6, machine_id ? machine_id : "", -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_list_events(EventRecord *out, int max_count,
+                   const char *category_filter,
+                   time_t from_ts, time_t to_ts)
+{
+    const char *sql_all =
+        "SELECT id,category,event_type,detail,user_id,job_id,machine_id,created_at"
+        " FROM events WHERE created_at >= ? AND (? = 0 OR created_at <= ?)"
+        " ORDER BY created_at DESC LIMIT ?;";
+    const char *sql_cat =
+        "SELECT id,category,event_type,detail,user_id,job_id,machine_id,created_at"
+        " FROM events WHERE category=? AND created_at >= ? AND (? = 0 OR created_at <= ?)"
+        " ORDER BY created_at DESC LIMIT ?;";
+
+    int has_cat = (category_filter && category_filter[0]);
+    sqlite3_stmt *st;
+    if (has_cat) {
+        if (sqlite3_prepare_v2(s_db, sql_cat, -1, &st, NULL) != SQLITE_OK) return 0;
+        sqlite3_bind_text (st, 1, category_filter, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 2, (sqlite3_int64)from_ts);
+        sqlite3_bind_int64(st, 3, (sqlite3_int64)to_ts);
+        sqlite3_bind_int64(st, 4, (sqlite3_int64)to_ts);
+        sqlite3_bind_int  (st, 5, max_count);
+    } else {
+        if (sqlite3_prepare_v2(s_db, sql_all, -1, &st, NULL) != SQLITE_OK) return 0;
+        sqlite3_bind_int64(st, 1, (sqlite3_int64)from_ts);
+        sqlite3_bind_int64(st, 2, (sqlite3_int64)to_ts);
+        sqlite3_bind_int64(st, 3, (sqlite3_int64)to_ts);
+        sqlite3_bind_int  (st, 4, max_count);
+    }
+
+    int count = 0;
+    while (sqlite3_step(st) == SQLITE_ROW && count < max_count) {
+        EventRecord *e = &out[count];
+        memset(e, 0, sizeof(*e));
+        e->id = sqlite3_column_int(st, 0);
+        const char *s;
+        s = (const char *)sqlite3_column_text(st, 1); if (s) strncpy(e->category,   s, sizeof(e->category)-1);
+        s = (const char *)sqlite3_column_text(st, 2); if (s) strncpy(e->event_type, s, sizeof(e->event_type)-1);
+        s = (const char *)sqlite3_column_text(st, 3); if (s) strncpy(e->detail,     s, sizeof(e->detail)-1);
+        s = (const char *)sqlite3_column_text(st, 4); if (s) strncpy(e->user_id,    s, sizeof(e->user_id)-1);
+        s = (const char *)sqlite3_column_text(st, 5); if (s) strncpy(e->job_id,     s, sizeof(e->job_id)-1);
+        s = (const char *)sqlite3_column_text(st, 6); if (s) strncpy(e->machine_id, s, sizeof(e->machine_id)-1);
+        e->created_at = (time_t)sqlite3_column_int64(st, 7);
+        count++;
+    }
+    sqlite3_finalize(st);
+    return count;
+}
+
+int db_count_events_by_type(const char *category, time_t from_ts, time_t to_ts,
+                            char types[][64], int counts[], int max_types)
+{
+    const char *sql =
+        "SELECT event_type, COUNT(*) FROM events"
+        " WHERE (? = '' OR category = ?)"
+        " AND created_at >= ? AND (? = 0 OR created_at <= ?)"
+        " GROUP BY event_type ORDER BY COUNT(*) DESC LIMIT ?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    const char *cat = (category && category[0]) ? category : "";
+    sqlite3_bind_text (st, 1, cat, -1, SQLITE_STATIC);
+    sqlite3_bind_text (st, 2, cat, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 3, (sqlite3_int64)from_ts);
+    sqlite3_bind_int64(st, 4, (sqlite3_int64)to_ts);
+    sqlite3_bind_int64(st, 5, (sqlite3_int64)to_ts);
+    sqlite3_bind_int  (st, 6, max_types);
+
+    int count = 0;
+    while (sqlite3_step(st) == SQLITE_ROW && count < max_types) {
+        const char *t = (const char *)sqlite3_column_text(st, 0);
+        if (t) strncpy(types[count], t, 63);
+        counts[count] = sqlite3_column_int(st, 1);
+        count++;
+    }
+    sqlite3_finalize(st);
+    return count;
+}
+
+/* ── Reporting / Analytics ────────────────────────────────────────── */
+
+int db_report_jobs_over_time(JobTimeBucket *out, int max_buckets,
+                             const char *granularity,
+                             time_t from_ts, time_t to_ts)
+{
+    const char *fmt;
+    if (strcmp(granularity, "hour") == 0)       fmt = "%Y-%m-%d %H:00";
+    else if (strcmp(granularity, "month") == 0) fmt = "%Y-%m";
+    else                                       fmt = "%Y-%m-%d";
+
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+        "SELECT strftime('%s', submitted_at, 'unixepoch') AS period,"
+        " COUNT(*),"
+        " SUM(CASE WHEN status=3 THEN 1 ELSE 0 END),"
+        " SUM(CASE WHEN status=5 THEN 1 ELSE 0 END),"
+        " AVG(CASE WHEN ended_at > started_at THEN ended_at - started_at ELSE NULL END)"
+        " FROM jobs"
+        " WHERE submitted_at >= ? AND (? = 0 OR submitted_at <= ?)"
+        " GROUP BY period ORDER BY period LIMIT ?;",
+        fmt);
+
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)from_ts);
+    sqlite3_bind_int64(st, 2, (sqlite3_int64)to_ts);
+    sqlite3_bind_int64(st, 3, (sqlite3_int64)to_ts);
+    sqlite3_bind_int  (st, 4, max_buckets);
+
+    int count = 0;
+    while (sqlite3_step(st) == SQLITE_ROW && count < max_buckets) {
+        JobTimeBucket *b = &out[count];
+        memset(b, 0, sizeof(*b));
+        const char *p = (const char *)sqlite3_column_text(st, 0);
+        if (p) strncpy(b->period, p, sizeof(b->period)-1);
+        b->total          = sqlite3_column_int(st, 1);
+        b->finished       = sqlite3_column_int(st, 2);
+        b->failed         = sqlite3_column_int(st, 3);
+        b->avg_duration_s = sqlite3_column_double(st, 4);
+        count++;
+    }
+    sqlite3_finalize(st);
+    return count;
+}
+
+int db_report_per_user(UserReport *out, int max_count,
+                       time_t from_ts, time_t to_ts)
+{
+    const char *sql =
+        "SELECT user_id, COUNT(*),"
+        " SUM(CASE WHEN status=3 THEN 1 ELSE 0 END),"
+        " SUM(CASE WHEN status=5 THEN 1 ELSE 0 END),"
+        " AVG(CASE WHEN ended_at > started_at THEN ended_at - started_at ELSE NULL END),"
+        " SUM(req_cores), SUM(req_ram_mb)"
+        " FROM jobs WHERE user_id != ''"
+        " AND submitted_at >= ? AND (? = 0 OR submitted_at <= ?)"
+        " GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT ?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)from_ts);
+    sqlite3_bind_int64(st, 2, (sqlite3_int64)to_ts);
+    sqlite3_bind_int64(st, 3, (sqlite3_int64)to_ts);
+    sqlite3_bind_int  (st, 4, max_count);
+
+    int count = 0;
+    while (sqlite3_step(st) == SQLITE_ROW && count < max_count) {
+        UserReport *r = &out[count];
+        memset(r, 0, sizeof(*r));
+        const char *u = (const char *)sqlite3_column_text(st, 0);
+        if (u) strncpy(r->user_id, u, sizeof(r->user_id)-1);
+        r->total_jobs       = sqlite3_column_int(st, 1);
+        r->finished         = sqlite3_column_int(st, 2);
+        r->failed           = sqlite3_column_int(st, 3);
+        r->avg_duration_s   = sqlite3_column_double(st, 4);
+        r->total_cores_used = sqlite3_column_int(st, 5);
+        r->total_ram_mb_used= sqlite3_column_int(st, 6);
+        count++;
+    }
+    sqlite3_finalize(st);
+    return count;
+}
+
+int db_report_per_app(AppReport *out, int max_count,
+                      time_t from_ts, time_t to_ts)
+{
+    const char *sql =
+        "SELECT app_id, COUNT(*),"
+        " SUM(CASE WHEN status=3 THEN 1 ELSE 0 END),"
+        " SUM(CASE WHEN status=5 THEN 1 ELSE 0 END),"
+        " AVG(CASE WHEN ended_at > started_at THEN ended_at - started_at ELSE NULL END)"
+        " FROM jobs WHERE app_id != ''"
+        " AND submitted_at >= ? AND (? = 0 OR submitted_at <= ?)"
+        " GROUP BY app_id ORDER BY COUNT(*) DESC LIMIT ?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)from_ts);
+    sqlite3_bind_int64(st, 2, (sqlite3_int64)to_ts);
+    sqlite3_bind_int64(st, 3, (sqlite3_int64)to_ts);
+    sqlite3_bind_int  (st, 4, max_count);
+
+    int count = 0;
+    while (sqlite3_step(st) == SQLITE_ROW && count < max_count) {
+        AppReport *r = &out[count];
+        memset(r, 0, sizeof(*r));
+        const char *a = (const char *)sqlite3_column_text(st, 0);
+        if (a) strncpy(r->app_id, a, sizeof(r->app_id)-1);
+        r->total_jobs     = sqlite3_column_int(st, 1);
+        r->finished       = sqlite3_column_int(st, 2);
+        r->failed         = sqlite3_column_int(st, 3);
+        r->avg_duration_s = sqlite3_column_double(st, 4);
+        count++;
+    }
+    sqlite3_finalize(st);
+    return count;
+}
+
+int db_report_per_machine(MachineReport *out, int max_count,
+                          time_t from_ts, time_t to_ts)
+{
+    const char *sql =
+        "SELECT machine_id, COUNT(*),"
+        " SUM(cores), SUM(ram_mb),"
+        " AVG(CASE WHEN released_at > allocated_at THEN 100.0 ELSE 0 END)"
+        " FROM allocations"
+        " WHERE allocated_at >= ? AND (? = 0 OR allocated_at <= ?)"
+        " GROUP BY machine_id ORDER BY COUNT(*) DESC LIMIT ?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)from_ts);
+    sqlite3_bind_int64(st, 2, (sqlite3_int64)to_ts);
+    sqlite3_bind_int64(st, 3, (sqlite3_int64)to_ts);
+    sqlite3_bind_int  (st, 4, max_count);
+
+    int count = 0;
+    while (sqlite3_step(st) == SQLITE_ROW && count < max_count) {
+        MachineReport *r = &out[count];
+        memset(r, 0, sizeof(*r));
+        const char *m = (const char *)sqlite3_column_text(st, 0);
+        if (m) strncpy(r->machine_id, m, sizeof(r->machine_id)-1);
+        r->total_allocations    = sqlite3_column_int(st, 1);
+        r->total_cores_reserved = sqlite3_column_int(st, 2);
+        r->total_ram_mb_reserved= sqlite3_column_int(st, 3);
+        r->avg_utilization_pct  = sqlite3_column_double(st, 4);
+        count++;
+    }
+    sqlite3_finalize(st);
+    return count;
 }

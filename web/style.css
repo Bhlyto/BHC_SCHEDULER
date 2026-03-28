@@ -73,6 +73,11 @@ th { text-align: left; padding: 10px 12px; color: var(--text2); font-weight: 500
 td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
 tr:hover td { background: var(--surface2); }
 
+/* Workflow group rows */
+.wf-group-header td { border-bottom: 1px solid var(--border); }
+.wf-group-header:hover td { background: var(--surface2) !important; }
+.wf-child td { border-left: 3px solid var(--primary); }
+
 /* Status badges */
 .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
 .badge-running { background: rgba(106,141,250,.15); color: var(--accent); }
@@ -114,3 +119,34 @@ tr:hover td { background: var(--surface2); }
   .modal { width: 95%; margin: 0 10px; }
   .nav { overflow-x: auto; }
 }
+
+/* ── Reports ──────────────────────────────────── */
+.chart-container { padding: 16px; min-height: 60px; }
+.report-bar-chart { display: flex; flex-direction: column; gap: 6px; }
+.bar-row { display: flex; align-items: center; gap: 8px; }
+.bar-label { width: 110px; font-size: 12px; color: var(--text2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-wrap { flex: 1; height: 20px; background: var(--table-border); border-radius: 3px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 3px; min-width: 2px; transition: width .3s; }
+.bar-value { width: 50px; font-size: 12px; color: var(--text2); }
+.input-sm { padding: 4px 8px; font-size: 13px; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
+
+/* ── Machine status grid ─────────────────────── */
+.machines-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; padding: 16px; }
+.machine-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; position: relative; }
+.machine-card.status-online { border-left: 4px solid var(--green); }
+.machine-card.status-offline { border-left: 4px solid var(--red); }
+.machine-card.status-probing { border-left: 4px solid var(--yellow, #ffc107); }
+.machine-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.machine-meta { font-size: 12px; color: var(--text2); margin-bottom: 6px; }
+.machine-status-badge { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.status-online .machine-status-badge { color: var(--green); }
+.status-offline .machine-status-badge { color: var(--red); }
+.status-probing .machine-status-badge { color: var(--yellow, #ffc107); }
+.machine-detail { font-size: 12px; color: var(--text2); line-height: 1.5; }
+.btn-wol { margin-top: 8px; padding: 4px 10px; font-size: 12px; background: var(--accent); color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+.btn-wol:hover { opacity: 0.8; }
+
+/* ── Cloud form ──────────────────────────────── */
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.form-grid label { display: block; font-size: 12px; color: var(--text2); margin-bottom: 4px; }
+.form-grid input, .form-grid select { width: 100%; }

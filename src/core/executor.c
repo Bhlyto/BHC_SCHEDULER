@@ -4,14 +4,94 @@
 #include "db.h"
 #include "log.h"
 #include "config.h"
+#include "events.h"
+#include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
+/* ── Auto-deprovision helper ──────────────────────────────────────────── */
+static void maybe_auto_deprovision(const char *machine_id)
+{
+    if (!g_config.cloud_auto_deprovision) return;
+    if (!machine_id || !machine_id[0]) return;
+
+    /* Parse first machine ID from comma-separated list */
+    char first_mid[64] = {0};
+    const char *comma = strchr(machine_id, ',');
+    if (comma) {
+        int len = (int)(comma - machine_id);
+        if (len > 63) len = 63;
+        memcpy(first_mid, machine_id, len);
+    } else {
+        strncpy(first_mid, machine_id, 63);
+    }
+
+    Machine *m = registry_get(first_mid);
+    if (!m || m->type != MACHINE_TYPE_CLOUD) return;
+
+    /* Check if the machine still has reserved resources */
+    if (m->cores_reserved > 0 || m->ram_mb_reserved > 0 ||
+        m->disk_mb_reserved > 0 || m->gpu_count_reserved > 0)
+        return;
+
+    /* Machine is cloud + completely idle → deprovision */
+    log_info("executor",
+        "Auto-deprovisioning idle cloud machine %s (%s/%s)",
+        m->id, m->cloud_provider, m->cloud_instance_id);
+
+    char detail[256];
+    snprintf(detail, sizeof(detail), "Auto-deprovisioned %s (provider=%s, instance=%s)",
+             m->id, m->cloud_provider, m->cloud_instance_id);
+
+    if (cloud_deprovision(m->cloud_provider, m->cloud_instance_id) == 0) {
+        events_push_persistent("cloud", "auto_deprovision", detail, "");
+        db_insert_event("cloud", "auto_deprovision", detail, "", "", m->id);
+    } else {
+        log_warn("executor", "Auto-deprovision failed for %s", m->id);
+    }
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  *  Shared helpers (platform-independent)
  * ═══════════════════════════════════════════════════════════════════ */
+
+/* Shell-escape a string for safe use inside double quotes in sh scripts.
+ * Escapes: \ " $ ` ! newlines */
+static void shell_escape(const char *src, char *dst, int dst_len)
+{
+    int j = 0;
+    for (int i = 0; src[i] && j < dst_len - 2; i++) {
+        switch (src[i]) {
+            case '\\': case '"': case '$': case '`': case '!':
+                dst[j++] = '\\';
+                if (j < dst_len - 1) dst[j++] = src[i];
+                break;
+            case '\n':
+                /* Skip newlines in env values */
+                break;
+            default:
+                dst[j++] = src[i];
+                break;
+        }
+    }
+    dst[j] = '\0';
+}
+
+/* Validate env variable key: only [A-Za-z0-9_], must start with letter/underscore */
+static int valid_env_key(const char *k)
+{
+    if (!k || !k[0]) return 0;
+    if (!(k[0] == '_' || (k[0] >= 'A' && k[0] <= 'Z') || (k[0] >= 'a' && k[0] <= 'z')))
+        return 0;
+    for (const char *p = k + 1; *p; p++) {
+        if (!(*p == '_' || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+              (*p >= '0' && *p <= '9')))
+            return 0;
+    }
+    return 1;
+}
 
 /*
  * Resolve machine_id to a network address (IP preferred over hostname).
@@ -104,14 +184,49 @@ static int write_run_script(const Job *job,
     }
     char n_machines_str[8];
     snprintf(n_machines_str, sizeof(n_machines_str), "%d", job->n_machines);
-    /* Use double-quoted export so values containing spaces work correctly.
-     * Backslash-escape any double-quotes inside the values (rare but safe). */
+    char escaped_mid[512];
+    shell_escape(job->machine_id, escaped_mid, sizeof(escaped_mid));
     fprintf(f, "#!/bin/sh\n");
     fprintf(f, "export ORCH_JOB_ID=\"%s\"\n",        job->id);
     fprintf(f, "export ORCH_INPUT_DIR=\"%s\"\n",     remote_input);
     fprintf(f, "export ORCH_OUTPUT_DIR=\"%s\"\n",    remote_output);
-    fprintf(f, "export ORCH_MACHINE_IDS=\"%s\"\n",   job->machine_id);
+    fprintf(f, "export ORCH_MACHINE_IDS=\"%s\"\n",   escaped_mid);
     fprintf(f, "export ORCH_MACHINE_COUNT=\"%s\"\n", n_machines_str);
+
+    /* Export app-specific environment from .app_env.json if present */
+    {
+        char env_path[768];
+#ifdef _WIN32
+        snprintf(env_path, sizeof(env_path), "%s\\.app_env.json", job->input_dir);
+#else
+        snprintf(env_path, sizeof(env_path), "%s/.app_env.json", job->input_dir);
+#endif
+        FILE *ef = fopen(env_path, "rb");
+        if (ef) {
+            fseek(ef, 0, SEEK_END); long esz = ftell(ef); rewind(ef);
+            if (esz > 0 && esz < 65536) {
+                char *edata = (char *)malloc(esz + 1);
+                fread(edata, 1, esz, ef);
+                edata[esz] = '\0';
+                cJSON *env = cJSON_Parse(edata);
+                if (env) {
+                    cJSON *kv = NULL;
+                    cJSON_ArrayForEach(kv, env) {
+                        if (cJSON_IsString(kv) && valid_env_key(kv->string)) {
+                            char escaped[4096];
+                            shell_escape(kv->valuestring, escaped, sizeof(escaped));
+                            fprintf(f, "export %s=\"%s\"\n",
+                                    kv->string, escaped);
+                        }
+                    }
+                    cJSON_Delete(env);
+                }
+                free(edata);
+            }
+            fclose(ef);
+        }
+    }
+
     fprintf(f, "mkdir -p \"$ORCH_OUTPUT_DIR\"\n");
     fprintf(f, "cd \"$ORCH_OUTPUT_DIR\"\n");
     fprintf(f, "exec %s\n", job->command);
@@ -226,6 +341,7 @@ static DWORD WINAPI watcher_thread(LPVOID arg)
 
     db_release_allocation(wa->job->id);
     alloc_release(wa->job->id);
+    maybe_auto_deprovision(wa->job->machine_id);
     /* Clean up temp known_hosts file */
     if (wa->known_hosts_path[0]) DeleteFileA(wa->known_hosts_path);
     free(wa);
@@ -473,9 +589,10 @@ static int spawn_process(Job *job)
         }
 
         /* 4. Launch SSH asynchronously — stdout/stderr piped to log files */
+        const char *rshell = g_config.ssh_shell[0] ? g_config.ssh_shell : "sh";
         _snprintf(cmd, sizeof(cmd),
-            "ssh %s %s@%s \"sh '%s/.run.sh'\"",
-            ssh_opts, g_config.ssh_user, host, remote_base);
+            "ssh %s %s@%s \"%s '%s/.run.sh'\"",
+            ssh_opts, g_config.ssh_user, host, rshell, remote_base);
         if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE,
                             CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
             log_error("executor", "SSH CreateProcess failed: %lu", GetLastError());
@@ -582,6 +699,7 @@ static void *watcher_thread(void *arg)
 
     db_release_allocation(wa->job->id);
     alloc_release(wa->job->id);
+    maybe_auto_deprovision(wa->job->machine_id);
     /* Clean up temp known_hosts file */
     if (wa->known_hosts_path[0]) remove(wa->known_hosts_path);
     free(wa);
@@ -703,10 +821,11 @@ static int spawn_process(Job *job)
 #undef RUN_SYNC_WARN
 
     /* 4. Fork and exec SSH asynchronously — stdout/stderr piped to log files */
+    const char *rshell = g_config.ssh_shell[0] ? g_config.ssh_shell : "sh";
     char ssh_cmd[1024];
     snprintf(ssh_cmd, sizeof(ssh_cmd),
-        "ssh %s %s@%s \"sh '%s/.run.sh'\"",
-        ssh_opts, g_config.ssh_user, host, remote_base);
+        "ssh %s %s@%s \"%s '%s/.run.sh'\"",
+        ssh_opts, g_config.ssh_user, host, rshell, remote_base);
 
     wordexp_t we;
     if (wordexp(ssh_cmd, &we, WRDE_NOCMD) != 0) {

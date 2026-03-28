@@ -298,6 +298,263 @@ DELETE /provision/:id
 
 App definitions are stored as JSON files in the `apps_dir` directory. Each app pre-defines resource requirements and custom form fields shown in the web UI.
 
+---
+
+## Events & Reporting
+
+All reporting endpoints require **admin** role.
+
+### List events
+```http
+GET /admin/events?category=job&from=1710000000&to=1720000000&limit=100
+```
+
+| Query param | Type | Default | Description |
+|---|---|---|---|
+| `category` | string | — | Filter by category (`job`, `cloud`, `machine`, `auth`) |
+| `from` | int | — | Unix timestamp — events after this time |
+| `to` | int | — | Unix timestamp — events before this time |
+| `limit` | int | 200 | Max events to return (capped at 1000) |
+
+Response `200`:
+```json
+[
+  {
+    "id": 1,
+    "category": "job",
+    "event_type": "dispatch",
+    "detail": "Job abc123 dispatched to srv-01",
+    "user_id": "alice",
+    "job_id": "abc123",
+    "machine_id": "srv-01",
+    "created_at": 1710500000
+  }
+]
+```
+
+---
+
+### Jobs over time
+```http
+GET /admin/reports/jobs?granularity=day&from=1710000000&to=1720000000
+```
+
+| Query param | Type | Default | Description |
+|---|---|---|---|
+| `granularity` | string | `day` | Time bucket: `hour`, `day`, or `month` |
+| `from` | int | — | Start timestamp |
+| `to` | int | — | End timestamp |
+
+```json
+[
+  {
+    "period": "2025-03-15",
+    "total": 42,
+    "finished": 35,
+    "failed": 5,
+    "avg_duration_s": 123.4
+  }
+]
+```
+
+---
+
+### Per-user report
+```http
+GET /admin/reports/users?from=1710000000&to=1720000000
+```
+
+```json
+[
+  {
+    "user_id": "alice",
+    "total_jobs": 120,
+    "finished": 110,
+    "failed": 8,
+    "avg_duration_s": 95.2,
+    "total_cores_used": 240,
+    "total_ram_mb_used": 491520
+  }
+]
+```
+
+---
+
+### Per-application report
+```http
+GET /admin/reports/apps?from=1710000000&to=1720000000
+```
+
+```json
+[
+  {
+    "app_id": "app1",
+    "total_jobs": 80,
+    "finished": 75,
+    "failed": 3,
+    "avg_duration_s": 200.0
+  }
+]
+```
+
+---
+
+### Per-machine report
+```http
+GET /admin/reports/machines?from=1710000000&to=1720000000
+```
+
+```json
+[
+  {
+    "machine_id": "srv-01",
+    "total_allocations": 50,
+    "total_cores_reserved": 200,
+    "total_ram_mb_reserved": 102400,
+    "avg_utilization_pct": 62.5
+  }
+]
+```
+
+---
+
+## Machine Status
+
+### Get full machine status grid
+```http
+GET /admin/machines/status
+```
+
+Returns all machines with probe status, type, cloud metadata, and MAC address:
+
+```json
+[
+  {
+    "id": "srv-01",
+    "hostname": "server01.local",
+    "ip": "192.168.1.10",
+    "enabled": true,
+    "status": "online",
+    "last_probe_time": 1710500000,
+    "probe_fail_count": 0,
+    "type": "static",
+    "cloud_provider": "",
+    "cloud_instance_id": "",
+    "mac_address": "AA:BB:CC:DD:EE:01",
+    "cores_total": 16,
+    "cores_reserved": 4,
+    "ram_mb_total": 32768,
+    "ram_mb_reserved": 4096
+  }
+]
+```
+
+`status` values: `"online"`, `"offline"`, `"probing"`.
+
+---
+
+## Cloud Provisioning
+
+### Provision a cloud machine
+```http
+POST /admin/cloud/provision
+Content-Type: application/json
+
+{
+  "provider":      "aws",
+  "instance_type": "t3.xlarge",
+  "region":        "eu-west-1",
+  "image_id":      "ami-0abcdef1234567890",
+  "cores":         4,
+  "gpu_count":     0,
+  "ram_mb":        16384,
+  "disk_mb":       100000,
+  "tags":          "{\"env\":\"prod\"}",
+  "cores_min":     2,
+  "ram_mb_min":    8192,
+  "disk_mb_min":   50000
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `provider` | string | ✅ | `"aws"`, `"gcp"`, or `"azure"` |
+| `instance_type` | string | — | Instance/VM size (e.g. `t3.xlarge`, `e2-standard-4`, `Standard_B2s`) |
+| `region` | string | — | Cloud region / zone |
+| `image_id` | string | — | AMI ID (AWS), image family (GCP), or image URN (Azure) |
+| `cores` | int | — | vCPUs to register in the pool |
+| `gpu_count` | int | — | GPUs to register |
+| `ram_mb` | int | — | RAM in MB to register |
+| `disk_mb` | int | — | Disk in MB to register |
+| `tags` | string | — | JSON string of key-value tags (AWS only) |
+| `cores_min` | int | — | Minimum cores for flexible scheduling |
+| `ram_mb_min` | int | — | Minimum RAM for flexible scheduling |
+| `disk_mb_min` | int | — | Minimum disk for flexible scheduling |
+
+Response `201`:
+```json
+{
+  "machine_id": "cloud-i-0abc123def456",
+  "provider": "aws",
+  "status": "provisioning"
+}
+```
+
+The machine is immediately registered in the pool and starts receiving probes. Once reachable, it transitions to `"online"` and becomes eligible for job dispatch.
+
+---
+
+### Deprovision a cloud machine
+```http
+POST /admin/cloud/deprovision
+Content-Type: application/json
+
+{
+  "provider":    "aws",
+  "instance_id": "i-0abc123def456"
+}
+```
+
+Response `200`:
+```json
+{ "ok": true }
+```
+
+The instance is terminated via the provider CLI and removed from the machine pool.
+
+### Auto-scaling
+
+Automatic provision/deprovision can be enabled in `orchestrator.conf` so that cloud machines are created on-demand when no existing machine fits a job, and terminated when they become idle. No API calls are needed — the scheduler handles everything. See [Configuration — Auto-scaling](configuration.md#auto-scaling-automatic-provision--deprovision).
+
+---
+
+## Wake-on-LAN
+
+### Send a WoL magic packet
+```http
+POST /admin/wol
+Content-Type: application/json
+
+{
+  "machine_id":   "srv-01",
+  "broadcast_ip": "192.168.1.255"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `machine_id` | string | ✅ | ID of the machine to wake |
+| `broadcast_ip` | string | — | Subnet broadcast address (default: `255.255.255.255`) |
+
+The machine must have a `mac_address` defined in `provisioning.json`.
+
+Response `200`:
+```json
+{ "ok": true, "message": "WoL packet sent" }
+```
+
+Returns `400` if the machine has no MAC address configured, or `404` if the machine ID is not found.
+
 ### List all apps
 ```http
 GET /apps

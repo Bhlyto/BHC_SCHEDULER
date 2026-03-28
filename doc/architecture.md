@@ -11,18 +11,20 @@ BHC_SCHEDULER/
 │   │   └── executor.c          # Process launch, pre-job script, stdout/stderr capture
 │   ├── http/
 │   │   ├── httpd.c             # Mongoose event loop, SSE subscriber list
-│   │   ├── routes.c            # Route dispatcher and all handlers
+│   │   ├── routes.c            # Route dispatcher, all handlers, reporting & cloud endpoints
 │   │   ├── auth.c              # SHA-256 API key check, password auth, role resolution
 │   │   ├── response.c          # JSON / error helpers
-│   │   └── events.c            # SSE event broadcasting
+│   │   └── events.c            # SSE event broadcasting, persistent event logging
 │   ├── persistence/
-│   │   ├── db.c                # SQLite — jobs, keys, users, quotas, stats, purge
+│   │   ├── db.c                # SQLite — jobs, keys, users, quotas, stats, events, reports
 │   │   ├── config.c            # INI parser
 │   │   └── log.c               # Leveled logger
 │   ├── resources/
 │   │   ├── registry.c          # Machine registry, pool expansion
 │   │   ├── allocator.c         # Single-machine and multi-machine allocation
-│   │   └── probe.c             # Resource probing
+│   │   └── probe.c             # TCP/ping/SSH probing, background sweep, Wake-on-LAN
+│   ├── cloud/
+│   │   └── cloud.c             # Cloud provisioning (AWS, GCP, Azure) via CLI
 │   ├── transfer/
 │   │   ├── store.c             # Work directory management
 │   │   ├── upload.c            # Input file write
@@ -38,7 +40,8 @@ BHC_SCHEDULER/
 │   ├── app.js                  # Core logic, auth, navigation, auto-refresh
 │   ├── dashboard.js            # Dashboard tab
 │   ├── jobs.js                 # Job list, submit, detail, file upload/download
-│   └── admin.js                # Users, keys, quotas, apps admin tabs
+│   ├── admin.js                # Users, keys, quotas, apps admin tabs
+│   └── reports.js              # Reporting charts, machine status grid, cloud provisioning UI
 ├── config/
 │   ├── orchestrator.conf       # Main configuration
 │   ├── provisioning.json       # Initial machine pool

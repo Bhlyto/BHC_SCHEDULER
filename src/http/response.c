@@ -1,6 +1,8 @@
 #include "http.h"
 #include "mongoose.h"
+#include "cJSON.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 void http_json_reply(struct mg_connection *c, int status_code,
@@ -14,9 +16,12 @@ void http_json_reply(struct mg_connection *c, int status_code,
 
 void http_error(struct mg_connection *c, int status_code, const char *msg)
 {
-    char body[256];
-    snprintf(body, sizeof(body), "{\"error\":\"%s\"}", msg);
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "error", msg);
+    char *body = cJSON_PrintUnformatted(obj);
     http_json_reply(c, status_code, body);
+    free(body);
+    cJSON_Delete(obj);
 }
 
 int http_stream_file(struct mg_connection *c, const char *filepath)

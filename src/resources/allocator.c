@@ -38,6 +38,7 @@ static int machine_can_fit(const Machine *M,
                             int cores, int gpu, int ram_mb, int disk_mb)
 {
     if (!M->enabled) return 0;
+    if (M->probe_status == MACHINE_OFFLINE) return 0;
     if (M->cores_total     - M->cores_reserved     < cores)   return 0;
     if (M->gpu_count_total - M->gpu_count_reserved < gpu)     return 0;
     if (M->ram_mb_total    - M->ram_mb_reserved    < ram_mb)  return 0;
@@ -289,6 +290,46 @@ int alloc_reserve(const char *job_id,
                          req_cores, req_gpu, req_ram_mb, req_disk_mb);
     log_info("allocator", "Reserved on %s for job %s (cores=%d gpu=%d ram=%dMB disk=%dMB)",
              chosen->id, job_id, req_cores, req_gpu, req_ram_mb, req_disk_mb);
+    return 0;
+}
+
+/* Reserve on a specific machine (for same-machine affinity). */
+int alloc_reserve_on(const char *job_id,
+                     const char *target_machine_id,
+                     int req_cores, int req_gpu,
+                     int req_ram_mb, int req_disk_mb)
+{
+    lock_acquire();
+    Machine *m = registry_get(target_machine_id);
+    if (!m || !machine_can_fit(m, req_cores, req_gpu, req_ram_mb, req_disk_mb)) {
+        lock_release();
+        return -1;
+    }
+
+    m->cores_reserved     += req_cores;
+    m->gpu_count_reserved += req_gpu;
+    m->ram_mb_reserved    += req_ram_mb;
+    m->disk_mb_reserved   += req_disk_mb;
+
+    if (s_alloc_count < MAX_ALLOC) {
+        AllocRecord *r = &s_allocs[s_alloc_count++];
+        memset(r, 0, sizeof(*r));
+        strncpy(r->job_id, job_id, sizeof(r->job_id)-1);
+        r->n_slots = 1;
+        strncpy(r->slots[0].machine_id, m->id, sizeof(r->slots[0].machine_id)-1);
+        r->slots[0].cores   = req_cores;
+        r->slots[0].gpu     = req_gpu;
+        r->slots[0].ram_mb  = req_ram_mb;
+        r->slots[0].disk_mb = req_disk_mb;
+        r->active = 1;
+    }
+
+    lock_release();
+
+    db_insert_allocation(job_id, m->id,
+                         req_cores, req_gpu, req_ram_mb, req_disk_mb);
+    log_info("allocator", "Reserved on %s (pinned) for job %s (cores=%d gpu=%d ram=%dMB disk=%dMB)",
+             m->id, job_id, req_cores, req_gpu, req_ram_mb, req_disk_mb);
     return 0;
 }
 

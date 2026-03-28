@@ -1,6 +1,7 @@
 #ifndef DB_H
 #define DB_H
 
+#include <time.h>
 #include "job.h"
 #include "resources.h"
 
@@ -105,6 +106,8 @@ int  db_list_user_records(UserRecord *out, int max_count);
 /* Password auth: set/check password, find existing key for user */
 int  db_set_user_password(const char *user_id, const char *password_hash);
 int  db_check_user_password(const char *user_id, const char *password_hash);
+int  db_get_user_auth(const char *user_id, char *out_hash, int hash_len,
+                      int *out_enabled);
 int  db_find_user_key(const char *user_id, char *out_key_hash, int hash_len);
 
 int db_insert_allocation(const char *job_id, const char *machine_id,
@@ -112,6 +115,12 @@ int db_insert_allocation(const char *job_id, const char *machine_id,
 int db_release_allocation(const char *job_id);
 
 int db_update_input_files(const char *job_id, const char *input_files);int  db_update_job_timeout(const char *job_id, int timeout_seconds);int db_audit(const char *event, const char *detail);
+int db_update_depends_on(const char *job_id, const char *depends_on);
+int db_update_workflow_id(const char *job_id, const char *workflow_id);
+int db_update_same_machine_as(const char *job_id, const char *ref_id);
+/* Check all dependency job statuses.
+   Returns: 0 = all FINISHED, 1 = still waiting, -1 = a dep FAILED/CANCELLED */
+int db_check_deps_status(const char *depends_on_csv);
 
 /* ── Quotas ────────────────────────────────────── */
 int  db_insert_quota(const Quota *q);
@@ -125,5 +134,96 @@ int  db_list_quotas(Quota *out, int max_count);
 int  db_quota_check(const char *user_id, const char *app_id,
                     int req_cores, int req_ram_mb,
                     char *out_reason, int reason_len);
+
+/* ── Workflows ─────────────────────────────────── */
+typedef struct {
+    char id[64];
+    char name[256];
+    char owner_id[128];
+    int  is_global;
+    char steps_json[16384];
+    time_t created_at;
+    time_t updated_at;
+} WorkflowDef;
+
+int  db_insert_workflow(const WorkflowDef *w);
+int  db_update_workflow(const WorkflowDef *w);
+int  db_delete_workflow(const char *wf_id);
+int  db_get_workflow(const char *wf_id, WorkflowDef *out);
+int  db_list_workflows(const char *user_id, WorkflowDef *out, int max_count);
+
+/* Favorites */
+int  db_add_workflow_favorite(const char *user_id, const char *wf_id);
+int  db_remove_workflow_favorite(const char *user_id, const char *wf_id);
+int  db_is_workflow_favorite(const char *user_id, const char *wf_id);
+
+/* ── Persistent Events (for reporting) ─────────── */
+typedef struct {
+    int    id;
+    char   category[64];    /* "job", "auth", "machine", "cloud", "system" */
+    char   event_type[64];  /* "submitted", "started", "finished", "failed", "login", etc. */
+    char   detail[1024];
+    char   user_id[128];
+    char   job_id[37];
+    char   machine_id[64];
+    time_t created_at;
+} EventRecord;
+
+int  db_insert_event(const char *category, const char *event_type,
+                     const char *detail, const char *user_id,
+                     const char *job_id, const char *machine_id);
+int  db_list_events(EventRecord *out, int max_count,
+                    const char *category_filter,
+                    time_t from_ts, time_t to_ts);
+int  db_count_events_by_type(const char *category, time_t from_ts, time_t to_ts,
+                             char types[][64], int counts[], int max_types);
+
+/* ── Reporting / Analytics ──────────────────────── */
+typedef struct {
+    char   period[32]; /* "2026-03-19" or "2026-03" or hour bucket */
+    int    total;
+    int    finished;
+    int    failed;
+    double avg_duration_s;
+} JobTimeBucket;
+
+int  db_report_jobs_over_time(JobTimeBucket *out, int max_buckets,
+                              const char *granularity,
+                              time_t from_ts, time_t to_ts);
+
+typedef struct {
+    char user_id[128];
+    int  total_jobs;
+    int  finished;
+    int  failed;
+    double avg_duration_s;
+    int  total_cores_used;
+    int  total_ram_mb_used;
+} UserReport;
+
+int  db_report_per_user(UserReport *out, int max_count,
+                        time_t from_ts, time_t to_ts);
+
+typedef struct {
+    char app_id[128];
+    int  total_jobs;
+    int  finished;
+    int  failed;
+    double avg_duration_s;
+} AppReport;
+
+int  db_report_per_app(AppReport *out, int max_count,
+                       time_t from_ts, time_t to_ts);
+
+typedef struct {
+    char machine_id[64];
+    int  total_allocations;
+    int  total_cores_reserved;
+    int  total_ram_mb_reserved;
+    double avg_utilization_pct;
+} MachineReport;
+
+int  db_report_per_machine(MachineReport *out, int max_count,
+                           time_t from_ts, time_t to_ts);
 
 #endif /* DB_H */

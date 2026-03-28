@@ -21,6 +21,32 @@ typedef struct {
     char ssh_user[64];           /* remote login, e.g. "deploy" */
     char ssh_key[512];           /* path to private key, no passphrase */
     char ssh_remote_work_dir[512]; /* base dir on remote, e.g. /tmp/orch */
+    char ssh_shell[64];          /* remote shell, e.g. "/bin/rbash" (empty = default) */
+
+    /* ── Security ── */
+    char command_mode[16];       /* "free" (default) or "app_only" */
+
+    /* ── Web UI / Bastion mode ── */
+    int  web_ui_enabled;         /* 1 = serve web UI (default), 0 = API-only bastion */
+    char listen_address[64];     /* bind address, e.g. "0.0.0.0" or "127.0.0.1" */
+
+    /* ── Machine probe / availability ── */
+    char probe_method[16];       /* "tcp" (default), "ping", "ssh" */
+    int  probe_port;             /* target port for tcp/ssh (default 22) */
+    int  probe_timeout_ms;       /* ms before marking unreachable (default 3000) */
+    int  probe_retries;          /* retries before OFFLINE (default 2) */
+    int  probe_interval_ms;      /* background re-probe interval (default 60000) */
+
+    /* ── Cloud ── */
+    char cloud_credentials_file[512]; /* path to cloud credentials JSON */
+
+    /* ── Cloud auto-scaling ── */
+    int  cloud_auto_provision;        /* 1 = auto-provision when no machine fits */
+    int  cloud_auto_deprovision;      /* 1 = auto-deprovision idle cloud machines */
+    char cloud_default_provider[32];  /* default provider for auto-prov */
+    char cloud_default_instance_type[64];
+    char cloud_default_region[64];
+    char cloud_default_image_id[128];
 } Config;
 
 extern Config g_config;
