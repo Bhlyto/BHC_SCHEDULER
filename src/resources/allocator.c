@@ -13,6 +13,7 @@
    static void lock_release(void){ LeaveCriticalSection(&s_lock); }
 #else
 #  include <pthread.h>
+#include <stdio.h>
    static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
    static void lock_acquire(void){ pthread_mutex_lock(&s_lock); }
    static void lock_release(void){ pthread_mutex_unlock(&s_lock); }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/test_api.sh  —  Plan de test complet (Linux / macOS)
-# Usage: API_KEY=<votre-cle> ./tests/test_api.sh
+ Usage: API_KEY=<votre-cle> ./tests/test_api.sh
 #        API_KEY=<cle> BASE=http://192.168.1.10:8080 ./tests/test_api.sh
 
 BASE="${BASE:-http://localhost:8080}"
@@ -22,14 +22,14 @@ check() {
 
 req() {
     local method="$1" path="$2" body="$3"
-    local args=(-s -X "$method" "$BASE$path" -H "X-API-Key: $KEY" -H 'Content-Type: application/json')
+    local args=(-s -X "$method" "$BASE$path" -H "X-API-Key: $KEY" -H "Content-Type: application/json")
     [ -n "$body" ] && args+=(-d "$body")
     curl "${args[@]}"
 }
 
 req_code() {
     local method="$1" path="$2"
-    curl -s -o /dev/null -w '%{http_code}' -X "$method" "$BASE$path" -H "X-API-Key: $KEY"
+    curl -s -o /dev/null -w '%{http_code}' -X "$method" "$BASE$path" -H "X-API-Key: $KEY" -H "Content-Type: application/json"
 }
 
 wait_job() {
@@ -54,7 +54,7 @@ echo -e "\n${CYA}══ 1. Authentification${RST}"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/jobs")
 check 'Requête sans clé → 401' '401' "$code"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/jobs" -H 'X-API-Key: INVALID')
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/jobs" -H "X-API-Key: INVALID")
 check 'Mauvaise clé → 401' '401' "$code"
 
 code=$(req_code GET '/jobs')
@@ -90,7 +90,7 @@ check 'GET /jobs/:id retourne le bon id'    "$JOB_BASIC" "$r"
 check 'GET /jobs/:id contient command'      'echo hello' "$r"
 check 'GET /jobs/:id contient status'       'IN_QUEUE|STARTING|RUNNING|FINISHED|FAILED' "$r"
 
-r=$(req GET '/jobs/00000000-0000-0000-0000-000000000000')
+r=$(req GET '/jobs/JOB_ID')
 check 'Job inexistant → 404'                '404|not.found' "$r"
 
 # ╔══════════════════════════════════════════╗
@@ -127,7 +127,7 @@ stderr_code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/jobs/$LOG_ID/log/std
 check 'GET /jobs/:id/log/stderr → 200'      '200' "$stderr_code"
 check 'GET /jobs/:id/log/stderr contient'   'stderr_test' "$stderr_content"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/jobs/00000000-0000-0000-0000-000000000000/log" -H "X-API-Key: $KEY")
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/jobs/JOB_ID/log" -H "X-API-Key: $KEY")
 check 'Log job inexistant → 404'            '404' "$code"
 
 # ╔══════════════════════════════════════════╗
@@ -166,7 +166,7 @@ check 'DELETE /jobs/:id → CANCELLED'        'CANCELLED|ok' "$r"
 r=$(req GET "/jobs/$CANCEL_ID")
 check 'Status après cancel = CANCELLED'     'CANCELLED' "$r"
 
-r=$(req DELETE '/jobs/00000000-0000-0000-0000-000000000000')
+r=$(req DELETE '/jobs/JOB_ID')
 check 'Cancel job inexistant → 404/error'   '404|not.found|error' "$r"
 
 # ╔══════════════════════════════════════════╗
@@ -339,6 +339,7 @@ echo "-- Upload input --"
 echo "hello world" > /tmp/test_input.txt
 r=$(curl -s -X POST "$BASE/jobs/$JOB_ID/input/test_input.txt" \
     -H "X-API-Key: $KEY" \
+    -H "Content-Type: application/octet-stream" \
     --data-binary @/tmp/test_input.txt)
 check "Upload bytes > 0" "bytes" "$r"
 

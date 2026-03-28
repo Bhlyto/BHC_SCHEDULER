@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+# Install runtime deps here (add as needed)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/solver
+COPY requirements.txt /opt/solver/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . /opt/solver
+
+ENTRYPOINT ["python3", "thermal_presim.py"]

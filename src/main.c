@@ -118,6 +118,15 @@ int main(int argc, char **argv)
         }
         config_defaults();
         config_load(conf);
+        /* Load optional presim-specific config without overwriting main settings */
+    #ifdef _WIN32
+        {
+            char _presim_buf[MAX_PATH]; exe_relative_path("config\\presim.conf", _presim_buf, sizeof(_presim_buf));
+            config_load(_presim_buf);
+        }
+    #else
+        config_load("config/presim.conf");
+    #endif
         log_set_level(g_config.log_level);
 #ifdef _WIN32
         resolve_config_paths();
@@ -170,6 +179,15 @@ int main(int argc, char **argv)
 
     config_defaults();
     config_load(conf);
+    /* Load optional presim-specific config so presim tuning lives in a separate file */
+#ifdef _WIN32
+    {
+        char _presim_buf2[MAX_PATH]; exe_relative_path("config\\presim.conf", _presim_buf2, sizeof(_presim_buf2));
+        config_load(_presim_buf2);
+    }
+#else
+    config_load("config/presim.conf");
+#endif
     log_set_level(g_config.log_level);
 #ifdef _WIN32
     resolve_config_paths();

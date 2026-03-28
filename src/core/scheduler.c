@@ -3,6 +3,9 @@
 #include "resources.h"
 #include "config.h"
 #include "log.h"
+#include "decision_core.h"
+#include "config.h"
+#include "cJSON.h"
 #include "db.h"
 #include "events.h"
 #include "transfer.h"
@@ -10,6 +13,17 @@
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
+
+/* local trim helper (like the one in config.c) */
+static void trim_local(char *s)
+{
+    char *start = s;
+    while (*start == ' ' || *start == '\t') start++;
+    if (start != s) memmove(s, start, strlen(start) + 1);
+    int len = (int)strlen(s);
+    while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\t' || s[len-1] == '\r' || s[len-1] == '\n'))
+        s[--len] = '\0';
+}
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -134,6 +148,88 @@ static void scheduler_check_held_jobs(void)
 
             j->depends_on[0] = '\0';
             db_update_depends_on(j->id, "");
+
+            /* After forwarding outputs (e.g., presim.json), re-run decision core
+             * so the parent job is re-evaluated immediately.
+             */
+            {
+                dc_context_t dctx;
+                memset(&dctx, 0, sizeof(dctx));
+                dctx.job_id = j->id;
+                /* compute available cpus across registry */
+                int mcount = 0;
+                Machine *ml = registry_all(&mcount);
+                uint32_t freecpus = 0;
+                uint32_t freemem = 0;
+                for (int mi = 0; ml && mi < mcount; mi++) {
+                    Machine *m = &ml[mi];
+                    if (m->enabled && m->probe_status == MACHINE_ONLINE) {
+                        int free = m->cores_total - m->cores_reserved - m->cores_min;
+                        if (free > 0) freecpus += (uint32_t)free;
+                        int memfree = m->ram_mb_total - m->ram_mb_reserved - m->ram_mb_min;
+                        if (memfree > 0) freemem += (uint32_t)memfree;
+                    }
+                }
+                dctx.available_cpus = freecpus;
+                dctx.available_mem_mb = freemem;
+                dc_result_t dres;
+                if (decision_core_decide(&dctx, &dres) == 0) {
+                    log_info("scheduler", "Post-presim decision for job %s -> action=%d, target_cores=%u",
+                             j->id, dres.action, dres.target_cores);
+                    if (dres.allocation_json[0]) db_update_status_reason(j->id, dres.allocation_json);
+                    if (dres.target_cores > 0 && dres.target_cores > (uint32_t)j->req_cores) j->req_cores = (int)dres.target_cores;
+
+                    /* Handle REFINE similarly to main loop: create refinement child jobs */
+                    if (dres.action == DC_ACTION_REFINE && dres.allocation_json[0]) {
+                        cJSON *root = cJSON_Parse(dres.allocation_json);
+                        if (root) {
+                            cJSON *zones = cJSON_GetObjectItemCaseSensitive(root, "zones");
+                            if (cJSON_IsArray(zones)) {
+                                int n = cJSON_GetArraySize(zones);
+                                char depends_buf[4096] = {0};
+                                for (int zi = 0; zi < n; zi++) {
+                                    cJSON *zone = cJSON_GetArrayItem(zones, zi);
+                                    if (!cJSON_IsObject(zone)) continue;
+                                    cJSON *jreq = cJSON_GetObjectItemCaseSensitive(zone, "req_cores");
+                                    cJSON *jf   = cJSON_GetObjectItemCaseSensitive(zone, "fidelity");
+                                    cJSON *jz   = cJSON_GetObjectItemCaseSensitive(zone, "zone");
+                                    int reqc = (cJSON_IsNumber(jreq) ? (int)jreq->valuedouble : 0);
+                                    int fidelity = (cJSON_IsNumber(jf) ? (int)jf->valuedouble : 1);
+                                    int zoneid = (cJSON_IsNumber(jz) ? (int)jz->valuedouble : zi);
+                                    if (reqc <= 0 && fidelity <= 1) continue;
+
+                                    char child_cmd[1024];
+                                    snprintf(child_cmd, sizeof(child_cmd), "%s --refine-zone=%d --fidelity=%d",
+                                             j->command, zoneid, fidelity);
+                                    Job *child = job_create_ex(child_cmd, j->priority + 5,
+                                                                reqc > 0 ? reqc : 1, j->req_gpu,
+                                                                j->req_ram_mb, j->req_disk_mb,
+                                                                j->user_id, j->app_id);
+                                    if (!child) continue;
+                                    store_init_job_dirs(child->id);
+                                    queue_push(s_queue, child);
+                                    if (depends_buf[0]) strncat(depends_buf, ",", sizeof(depends_buf)-strlen(depends_buf)-1);
+                                    strncat(depends_buf, child->id, sizeof(depends_buf)-strlen(depends_buf)-1);
+                                }
+                                if (depends_buf[0]) {
+                                    db_update_depends_on(j->id, depends_buf);
+                                    db_update_job_status(j->id, JOB_STATUS_HELD, 0, 0);
+                                    db_update_status_reason(j->id, "Waiting for refinement subjobs");
+                                }
+                            }
+                            cJSON_Delete(root);
+                        }
+                    } else if (dres.action == DC_ACTION_DEFER) {
+                        db_update_status_reason(j->id, "Deferred by decision core");
+                    } else if (dres.action == DC_ACTION_MIGRATE) {
+                        db_update_status_reason(j->id, "Migration requested by decision core");
+                    } else if (dres.action == DC_ACTION_RUN_COARSE_SIM) {
+                        db_update_status_reason(j->id, "Strategy: run coarse simulation");
+                    } else if (dres.action == DC_ACTION_RUN_FINE_SIM) {
+                        db_update_status_reason(j->id, "Strategy: run fine simulation");
+                    }
+                }
+            }
         }
 
         /* ── Check input files ──────────────────────────────────── */
@@ -310,6 +406,201 @@ static void *scheduler_thread(void *arg)
             /* If ref job not found, fall through to normal allocation */
         }
 
+        /* If this job's domain supports presim and no presim.json exists,
+         * submit a presim job and hold the parent until presim completes.
+         * Supported domains: thermal (extendable).
+         */
+        {
+            char input_dir[512];
+            store_input_dir(job->id, input_dir, sizeof(input_dir));
+            char presim_path[768];
+#ifdef _WIN32
+            snprintf(presim_path, sizeof(presim_path), "%s\\presim.json", input_dir);
+#else
+            snprintf(presim_path, sizeof(presim_path), "%s/presim.json", input_dir);
+#endif
+            FILE *pf = fopen(presim_path, "rb");
+            int has_presim = pf ? (fclose(pf), 1) : 0;
+            /* Trigger presim only for configured domains and when presim missing */
+            int trigger_presim = 0;
+            if (!has_presim && job->app_id && g_config.presim_domains[0]) {
+                /* presim_domains is a comma-separated list; match exact domain names */
+                char pd[256]; strncpy(pd, g_config.presim_domains, sizeof(pd)-1); pd[sizeof(pd)-1] = '\0';
+                char *tok = strtok(pd, ",");
+                while (tok) {
+                    trim_local(tok);
+                    if (strcmp(tok, job->app_id) == 0) { trigger_presim = 1; break; }
+                    tok = strtok(NULL, ",");
+                }
+            }
+            if (trigger_presim) {
+                log_info("scheduler", "Submitting presim job for parent %s (domain=%s)", job->id, job->app_id);
+                /* create presim child job that runs the Python presim solver */
+                char child_cmd[1024];
+                /* write presim into parent's input dir */
+                /* Allow domain-specific solver paths under tools/python_solvers/<domain>_presim.py
+                 * Default to <domain>_presim.py for convenience. */
+                char solver_path[512];
+                snprintf(solver_path, sizeof(solver_path), "tools/python_solvers/%s_presim.py", job->app_id);
+                /* Allow overriding solver command via environment variable PRESIM_SOLVER_CMD
+                 * Supported placeholders: {parent}, {out}, {domain}, {input_dir}
+                 */
+                const char *env_cmd = getenv("PRESIM_SOLVER_CMD");
+                if (env_cmd && env_cmd[0]) {
+                    /* perform simple placeholder replacement into child_cmd */
+                    const char *src = env_cmd;
+                    size_t left = sizeof(child_cmd) - 1;
+                    child_cmd[0] = '\0';
+                    while (*src && left > 0) {
+                        const char *p;
+                        if ((p = strstr(src, "{parent}")) == src) {
+                            int n = snprintf(child_cmd + strlen(child_cmd), left+1, "%s", job->id);
+                            if (n < 0 || (size_t)n > left) break; left -= (size_t)n; src += 8; continue;
+                        } else if ((p = strstr(src, "{out}")) == src) {
+                            int n = snprintf(child_cmd + strlen(child_cmd), left+1, "%s", presim_path);
+                            if (n < 0 || (size_t)n > left) break; left -= (size_t)n; src += 5; continue;
+                        } else if ((p = strstr(src, "{domain}")) == src) {
+                            int n = snprintf(child_cmd + strlen(child_cmd), left+1, "%s", job->app_id);
+                            if (n < 0 || (size_t)n > left) break; left -= (size_t)n; src += 8; continue;
+                        } else if ((p = strstr(src, "{input_dir}")) == src) {
+                            int n = snprintf(child_cmd + strlen(child_cmd), left+1, "%s", input_dir);
+                            if (n < 0 || (size_t)n > left) break; left -= (size_t)n; src += 11; continue;
+                        }
+                        /* copy one char */
+                        size_t to_copy = 1;
+                        strncat(child_cmd, src, to_copy);
+                        src += to_copy; left -= to_copy;
+                    }
+                } else {
+                    snprintf(child_cmd, sizeof(child_cmd), "python3 %s --parent %s --out %s", solver_path, job->id, presim_path);
+                }
+                Job *child = job_create_ex(child_cmd, job->priority + 5, 1, 0, 0, 0, job->user_id, "presim");
+                if (child) {
+                    store_init_job_dirs(child->id);
+                    queue_push(s_queue, child);
+                    /* mark parent as held and depends_on child */
+                    db_update_depends_on(job->id, child->id);
+                    db_update_job_status(job->id, JOB_STATUS_HELD, 0, 0);
+                    db_update_status_reason(job->id, "Waiting for presim subjob");
+                    continue; /* don't run decision core yet */
+                } else {
+                    log_warn("scheduler", "Failed to create presim child for job %s", job->id);
+                }
+            }
+        }
+
+        /* Ask decision core for strategy / allocation hints */
+        {
+            dc_context_t dctx;
+            memset(&dctx, 0, sizeof(dctx));
+            dctx.job_id = job->id;
+            /* compute available cpus across registry */
+            {
+                int mcount = 0;
+                Machine *ml = registry_all(&mcount);
+                uint32_t freecpus = 0;
+                for (int mi = 0; mi < mcount; mi++) {
+                    if (!ml) break;
+                    Machine *m = &ml[mi];
+                    if (m->enabled && m->probe_status == MACHINE_ONLINE) {
+                        int free = m->cores_total - m->cores_reserved - m->cores_min;
+                        if (free > 0) freecpus += (uint32_t)free;
+                    }
+                }
+                dctx.available_cpus = freecpus;
+                /* sum RAM */
+                uint32_t freemem = 0;
+                for (int mi = 0; mi < mcount; mi++) {
+                    Machine *m = &ml[mi];
+                    if (m->enabled && m->probe_status == MACHINE_ONLINE) {
+                        int free = m->ram_mb_total - m->ram_mb_reserved - m->ram_mb_min;
+                        if (free > 0) freemem += (uint32_t)free;
+                    }
+                }
+                dctx.available_mem_mb = freemem;
+            }
+            dc_result_t dres;
+            if (decision_core_decide(&dctx, &dres) == 0) {
+                if (dres.allocation_json[0]) {
+                    db_update_status_reason(job->id, dres.allocation_json);
+                }
+                if (dres.target_cores > 0) {
+                    /* Respect decision by requesting at least target cores */
+                    if (dres.target_cores > (uint32_t)job->req_cores)
+                        job->req_cores = (int)dres.target_cores;
+                }
+
+                log_info("scheduler", "Decision core for job %s -> action=%d, target_cores=%u",
+                         job->id, dres.action, dres.target_cores);
+
+                /* Act on decision: REFINE -> create refinement child jobs and hold parent */
+                if (dres.action == DC_ACTION_REFINE && dres.allocation_json[0]) {
+                    cJSON *root = cJSON_Parse(dres.allocation_json);
+                    if (root) {
+                        cJSON *zones = cJSON_GetObjectItemCaseSensitive(root, "zones");
+                        if (cJSON_IsArray(zones)) {
+                            int n = cJSON_GetArraySize(zones);
+                            char depends_buf[4096] = {0};
+                            for (int zi = 0; zi < n; zi++) {
+                                cJSON *zone = cJSON_GetArrayItem(zones, zi);
+                                if (!cJSON_IsObject(zone)) continue;
+                                cJSON *jreq = cJSON_GetObjectItemCaseSensitive(zone, "req_cores");
+                                cJSON *jf   = cJSON_GetObjectItemCaseSensitive(zone, "fidelity");
+                                cJSON *jz   = cJSON_GetObjectItemCaseSensitive(zone, "zone");
+                                int reqc = (cJSON_IsNumber(jreq) ? (int)jreq->valuedouble : 0);
+                                int fidelity = (cJSON_IsNumber(jf) ? (int)jf->valuedouble : 1);
+                                int zoneid = (cJSON_IsNumber(jz) ? (int)jz->valuedouble : zi);
+                                if (reqc <= 0 && fidelity <= 1) continue; /* nothing to do */
+
+                                /* Create a refinement child job that will produce refined data for the zone */
+                                char child_cmd[1024];
+                                snprintf(child_cmd, sizeof(child_cmd), "%s --refine-zone=%d --fidelity=%d",
+                                         job->command, zoneid, fidelity);
+                                Job *child = job_create_ex(child_cmd, job->priority + 5,
+                                                            reqc > 0 ? reqc : 1, job->req_gpu,
+                                                            job->req_ram_mb, job->req_disk_mb,
+                                                            job->user_id, job->app_id);
+                                if (!child) continue;
+                                /* Initialize child job dirs so it can run immediately */
+                                store_init_job_dirs(child->id);
+                                /* push child into queue for execution */
+                                queue_push(s_queue, child);
+                                if (depends_buf[0]) strncat(depends_buf, ",", sizeof(depends_buf)-strlen(depends_buf)-1);
+                                strncat(depends_buf, child->id, sizeof(depends_buf)-strlen(depends_buf)-1);
+                            }
+                            if (depends_buf[0]) {
+                                /* Mark parent job as HELD until child refinements finish */
+                                db_update_depends_on(job->id, depends_buf);
+                                db_update_job_status(job->id, JOB_STATUS_HELD, 0, 0);
+                                db_update_status_reason(job->id, "Waiting for refinement subjobs");
+                                /* Do not dispatch parent now */
+                                continue;
+                            }
+                        }
+                        cJSON_Delete(root);
+                    }
+                }
+
+                /* Migrate: leave for allocator to choose another machine (no-op here), Defer: requeue */
+                if (dres.action == DC_ACTION_DEFER) {
+                    db_update_status_reason(job->id, "Deferred by decision core");
+                    queue_push(s_queue, job);
+                    continue;
+                }
+                if (dres.action == DC_ACTION_MIGRATE) {
+                    db_update_status_reason(job->id, "Migration requested by decision core");
+                    queue_push(s_queue, job);
+                    continue;
+                }
+                /* For RUN_COARSE / RUN_FINE we just tag the job and proceed to allocation */
+                if (dres.action == DC_ACTION_RUN_COARSE_SIM) {
+                    db_update_status_reason(job->id, "Strategy: run coarse simulation");
+                } else if (dres.action == DC_ACTION_RUN_FINE_SIM) {
+                    db_update_status_reason(job->id, "Strategy: run fine simulation");
+                }
+            }
+        }
+
         int can_single = alloc_can_fit(job->req_cores, job->req_gpu,
                                         job->req_ram_mb, job->req_disk_mb);
         int can_multi  = !can_single
@@ -445,6 +736,8 @@ static void *scheduler_thread(void *arg)
 Queue *scheduler_init(void)
 {
     s_queue = queue_create(64);
+    /* Initialize decision core (config_path optional) */
+    decision_core_init(NULL);
     return s_queue;
 }
 
@@ -465,6 +758,8 @@ void scheduler_stop(void)
 {
     s_running = 0;
     if (s_queue) queue_shutdown(s_queue);
+    /* Shutdown decision core */
+    decision_core_shutdown();
 }
 
 Queue *scheduler_queue(void)

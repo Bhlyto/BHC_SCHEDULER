@@ -76,7 +76,7 @@ Content-Type: application/json
 Response `201`:
 ```json
 {
-  "id":              "550e8400-e29b-41d4-a716-446655440000",
+  "id":              "JOB_ID",
   "command":         "python3 train.py",
   "status":          "QUEUED",
   "priority":        50,
@@ -620,7 +620,7 @@ Response includes per-user job statistics:
   {
     "user_id": "alice",
     "display_name": "Alice Smith",
-    "email": "alice@example.com",
+    "email": "user@EXAMPLE.COM",
     "enabled": true,
     "created_at": 1709827200,
     "total_jobs": 5,
@@ -643,7 +643,7 @@ Content-Type: application/json
 {
   "user_id": "alice",
   "display_name": "Alice Smith",
-  "email": "alice@example.com",
+  "email": "user@EXAMPLE.COM",
   "password": "initial-password"
 }
 ```
@@ -656,7 +656,7 @@ Also accepts an array for batch creation.
 PUT /admin/users
 Content-Type: application/json
 
-{ "user_id": "alice", "display_name": "Alice S.", "email": "alice@new.com", "enabled": false }
+{ "user_id": "alice", "display_name": "Alice S.", "email": "user@EXAMPLE.COM", "enabled": false }
 ```
 
 ---

@@ -34,6 +34,12 @@ void config_defaults(void)
     strncpy(g_config.db_path,           "orchestrator.db",            sizeof(g_config.db_path)-1);
     strncpy(g_config.apps_dir,          "config/apps",                sizeof(g_config.apps_dir)-1);
     strncpy(g_config.provisioning_json, "config/provisioning.json",   sizeof(g_config.provisioning_json)-1);
+        strncpy(g_config.presim_domains, "thermal", sizeof(g_config.presim_domains)-1);
+        g_config.presim_threshold_max = 0.03;
+        g_config.presim_refine_multiplier = 0.8;
+        g_config.presim_high_multiplier = 2.0;
+        g_config.presim_uncertainty_weight = 1.0;
+        strncpy(g_config.presim_fidelity_map, "0,1,3,6", sizeof(g_config.presim_fidelity_map)-1);
     strncpy(g_config.pid_file,          "/var/run/orchestrator.pid",  sizeof(g_config.pid_file)-1);
 #endif
 }
@@ -104,6 +110,12 @@ int config_load(const char *path)
         else if (strcmp(key, "cloud_default_instance_type") == 0) strncpy(g_config.cloud_default_instance_type, val, sizeof(g_config.cloud_default_instance_type)-1);
         else if (strcmp(key, "cloud_default_region")        == 0) strncpy(g_config.cloud_default_region,        val, sizeof(g_config.cloud_default_region)-1);
         else if (strcmp(key, "cloud_default_image_id")      == 0) strncpy(g_config.cloud_default_image_id,      val, sizeof(g_config.cloud_default_image_id)-1);
+            else if (strcmp(key, "presim_threshold_max")         == 0) g_config.presim_threshold_max = atof(val);
+        else if (strcmp(key, "presim_refine_multiplier")     == 0) g_config.presim_refine_multiplier = atof(val);
+        else if (strcmp(key, "presim_high_multiplier")       == 0) g_config.presim_high_multiplier = atof(val);
+        else if (strcmp(key, "presim_uncertainty_weight")    == 0) g_config.presim_uncertainty_weight = atof(val);
+        else if (strcmp(key, "presim_fidelity_map")          == 0) strncpy(g_config.presim_fidelity_map, val, sizeof(g_config.presim_fidelity_map)-1);
+            else if (strcmp(key, "presim_domains")              == 0) strncpy(g_config.presim_domains,              val, sizeof(g_config.presim_domains)-1);
         else fprintf(stderr, "[config] Unknown key: %s\n", key);
     }
     fclose(f);

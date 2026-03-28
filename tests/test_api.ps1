@@ -136,7 +136,7 @@ Check "GET /jobs/:id retourne le bon id"   $JOB_BASIC $r.id
 Check "GET /jobs/:id contient command"     "echo hello" $r.command
 Check "GET /jobs/:id contient status"      "IN_QUEUE|STARTING|RUNNING|FINISHED|FAILED" $r.status
 
-$r = Req GET "/jobs/00000000-0000-0000-0000-000000000000"
+$r = Req GET "/jobs/JOB_ID"
 Check "Job inexistant -> 404"              "404|not.found" ($r | ConvertTo-Json)
 
 # =============================================
@@ -176,7 +176,7 @@ $r = ReqRaw GET "/jobs/$log_id/log/stderr"
 if ($r.StatusCode -eq 200) { Pass "GET /jobs/:id/log/stderr accessible" }
 else { Fail "GET /jobs/:id/log/stderr accessible" "code=$($r.StatusCode)" }
 
-$r = ReqRaw GET "/jobs/00000000-0000-0000-0000-000000000000/log"
+$r = ReqRaw GET "/jobs/JOB_ID/log"
 if ($r.StatusCode -eq 404) { Pass "Log job inexistant -> 404" }
 else { Fail "Log job inexistant -> 404" "code=$($r.StatusCode)" }
 
@@ -225,7 +225,7 @@ if ($r._error -eq 409) {
     Check "Status apres cancel = CANCELLED" "CANCELLED" $r2.status
 }
 
-$r = Req DELETE "/jobs/00000000-0000-0000-0000-000000000000"
+$r = Req DELETE "/jobs/JOB_ID"
 Check "Cancel job inexistant -> 404"      "404|not.found|error" ($r | ConvertTo-Json)
 
 # =============================================

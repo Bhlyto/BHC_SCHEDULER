@@ -2758,6 +2758,42 @@ static void admin_wol(struct mg_connection *c, struct mg_http_message *hm)
     http_json_reply(c, 200, "{\"ok\":true,\"message\":\"WoL packet sent\"}");
 }
 
+/* GET/POST /admin/presim-config — view or update presim runtime settings (admin only) */
+static void admin_get_presim_config(struct mg_connection *c, struct mg_http_message *hm)
+{
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(obj, "presim_threshold_max", g_config.presim_threshold_max);
+    cJSON_AddNumberToObject(obj, "presim_refine_multiplier", g_config.presim_refine_multiplier);
+    cJSON_AddNumberToObject(obj, "presim_high_multiplier", g_config.presim_high_multiplier);
+    cJSON_AddNumberToObject(obj, "presim_uncertainty_weight", g_config.presim_uncertainty_weight);
+    cJSON_AddStringToObject(obj, "presim_fidelity_map", g_config.presim_fidelity_map);
+    cJSON_AddStringToObject(obj, "presim_domains", g_config.presim_domains);
+    char *body = cJSON_PrintUnformatted(obj);
+    http_json_reply(c, 200, body);
+    free(body); cJSON_Delete(obj);
+}
+
+static void admin_update_presim_config(struct mg_connection *c, struct mg_http_message *hm)
+{
+    cJSON *body = cJSON_ParseWithLength(hm->body.buf, hm->body.len);
+    if (!body) { http_error(c, 400, "Invalid JSON"); return; }
+    cJSON *j;
+    j = cJSON_GetObjectItemCaseSensitive(body, "presim_threshold_max");
+    if (cJSON_IsNumber(j)) g_config.presim_threshold_max = j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(body, "presim_refine_multiplier");
+    if (cJSON_IsNumber(j)) g_config.presim_refine_multiplier = j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(body, "presim_high_multiplier");
+    if (cJSON_IsNumber(j)) g_config.presim_high_multiplier = j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(body, "presim_uncertainty_weight");
+    if (cJSON_IsNumber(j)) g_config.presim_uncertainty_weight = j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(body, "presim_fidelity_map");
+    if (cJSON_IsString(j)) strncpy(g_config.presim_fidelity_map, j->valuestring, sizeof(g_config.presim_fidelity_map)-1);
+    j = cJSON_GetObjectItemCaseSensitive(body, "presim_domains");
+    if (cJSON_IsString(j)) strncpy(g_config.presim_domains, j->valuestring, sizeof(g_config.presim_domains)-1);
+    cJSON_Delete(body);
+    http_json_reply(c, 200, "{\"ok\":true}");
+}
+
 void routes_handler(struct mg_connection *c, int ev, void *ev_data)
 {
     if (ev != MG_EV_HTTP_MSG) return;
@@ -2841,6 +2877,13 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
             http_error(c, 403, "Forbidden: admin role required");
             return;
         }
+    }
+
+    /* Admin: presim config endpoints */
+    if (strcmp(seg[0], "admin") == 0 && strcmp(seg[1], "presim-config") == 0) {
+        if (strcmp(method, "GET") == 0) { admin_get_presim_config(c, hm); return; }
+        if (strcmp(method, "POST") == 0) { admin_update_presim_config(c, hm); return; }
+        http_error(c, 404, "Not found"); return;
     }
 
     /* /jobs */

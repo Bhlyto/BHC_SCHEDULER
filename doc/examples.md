@@ -68,7 +68,7 @@ Invoke-RestMethod -Uri "$base/admin/apps/my-app" -Method DELETE -Headers $header
 
 # ── Users (admin) ────────────────────────────────
 Invoke-RestMethod -Uri "$base/admin/users" -Method GET -Headers $headers
-$user = '{"user_id":"bob","display_name":"Bob","email":"bob@example.com","password":"pass123"}'
+$user = '{"user_id":"bob","display_name":"Bob","email":"user@EXAMPLE.COM","password":"pass123"}'
 Invoke-RestMethod -Uri "$base/admin/users" -Method POST -Headers $headers -Body $user
 
 # ── API Keys (admin) ─────────────────────────────

@@ -151,7 +151,7 @@ extern "C" {
 #define SQLITE_SOURCE_ID      "2026-01-09 17:27:48 b270f8339eb13b504d0b2ba154ebca966b7dde08e40c3ed7d559749818cb2075"
 #define SQLITE_SCM_BRANCH     "branch-3.51"
 #define SQLITE_SCM_TAGS       "release version-3.51.2"
-#define SQLITE_SCM_DATETIME   "2026-01-09T17:27:48.405Z"
+#define SQLITE_SCM_DATETIME   "TIMESTAMP.405Z"
 
 /*
 ** CAPI3REF: Run-Time Library Version Numbers
@@ -3911,11 +3911,11 @@ SQLITE_API void sqlite3_progress_handler(sqlite3*, int, int(*)(void*), void*);
 ** <tr><th> URI filenames <th> Results
 ** <tr><td> file:data.db <td>
 **          Open the file "data.db" in the current directory.
-** <tr><td> file:/home/fred/data.db<br>
-**          file:///home/fred/data.db <br>
-**          file://localhost/home/fred/data.db <br> <td>
-**          Open the database file "/home/fred/data.db".
-** <tr><td> file://darkstar/home/fred/data.db <td>
+** <tr><td> file:/home/USER/data.db<br>
+**          file:///home/USER/data.db <br>
+**          file://localhost/home/USER/data.db <br> <td>
+**          Open the database file "/home/USER/data.db".
+** <tr><td> file://darkstar/home/USER/data.db <td>
 **          An error. "darkstar" is not a recognized authority.
 ** <tr><td style="white-space:nowrap">
 **          file:///C:/Documents%20and%20Settings/fred/Desktop/data.db
@@ -3927,8 +3927,8 @@ SQLITE_API void sqlite3_progress_handler(sqlite3*, int, int(*)(void*), void*);
 **          Open file "data.db" in the current directory for read-only access.
 **          Regardless of whether or not shared-cache mode is enabled by
 **          default, use a private cache.
-** <tr><td> file:/home/fred/data.db?vfs=unix-dotfile <td>
-**          Open file "/home/fred/data.db". Use the special VFS "unix-dotfile"
+** <tr><td> file:/home/USER/data.db?vfs=unix-dotfile <td>
+**          Open file "/home/USER/data.db". Use the special VFS "unix-dotfile"
 **          that uses dot-files in place of posix advisory locking.
 ** <tr><td> file:data.db?mode=readonly <td>
 **          An error. "readonly" is not a valid option for the "mode" parameter.
@@ -7389,7 +7389,7 @@ SQLITE_API SQLITE_DEPRECATED void sqlite3_soft_heap_limit(int N);
 **     data type: "INTEGER"
 **     collation sequence: "BINARY"
 **     not null: 0
-**     primary key: 1
+**     primary key: REDACTED
 **     auto increment: 0
 ** </pre>)^
 **

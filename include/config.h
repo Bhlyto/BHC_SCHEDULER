@@ -47,6 +47,12 @@ typedef struct {
     char cloud_default_instance_type[64];
     char cloud_default_region[64];
     char cloud_default_image_id[128];
+    char presim_domains[256];   /* comma-separated domains that trigger presim automatically */
+    double presim_threshold_max; /* conservative upper bound for presim threshold */
+    double presim_refine_multiplier; /* multiplier for refine cutoff (priority > threshold * mult) */
+    double presim_high_multiplier;   /* multiplier for high-fidelity cutoff */
+    double presim_uncertainty_weight; /* weight for zone uncertainty in priority */
+    char   presim_fidelity_map[64]; /* CSV map for fidelity -> cores, index 0 unused e.g. "0,1,3,6" */
 } Config;
 
 extern Config g_config;

@@ -60,6 +60,8 @@ set(CORE_SOURCES
     src/http/httpd.c
     src/http/events.c
     src/cloud/cloud.c
+    src/decision_core_default.c
+    src/solvers/thermal/thermal_solver.c
 )
 
 # ──────────────────────────────────────────────
@@ -72,7 +74,32 @@ add_executable(orchestrator
     ${VENDOR_SOURCES}
 )
 
+add_executable(dc_test
+    src/tools/dc_test.c
+    ${CORE_SOURCES}
+    ${VENDOR_SOURCES}
+)
+target_include_directories(dc_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(dc_test ${PLATFORM_LIBS})
+
 target_link_libraries(orchestrator ${PLATFORM_LIBS})
+
+add_executable(presim_runner
+    src/tools/presim_runner.c
+    src/solvers/thermal/thermal_solver.c
+)
+target_include_directories(presim_runner PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(UNIX)
+    target_link_libraries(presim_runner pthread dl m)
+endif()
+
+add_executable(presim_e2e_test
+    src/tools/presim_e2e_test.c
+    ${CORE_SOURCES}
+    ${VENDOR_SOURCES}
+)
+target_include_directories(presim_e2e_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(presim_e2e_test ${PLATFORM_LIBS})
 
 # Copy config/ next to the executable after each build
 add_custom_command(TARGET orchestrator POST_BUILD
