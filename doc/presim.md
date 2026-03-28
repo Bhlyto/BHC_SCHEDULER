@@ -38,3 +38,18 @@ Notes:
 Integration tips:
 - The presim_runner binary is provided in `src/tools/presim_runner.c` and linked as `presim_runner` in the build.
 - The `thermal` solver implementation is in `src/solvers/thermal/thermal_solver.c` and is a model for adding other domain solvers.
+
+Tooling & config
+- `config/presim.conf`: presim-specific tuning parameters (thresholds, multipliers, fidelity map). The orchestrator reads `presim.conf` at startup if present. Use `tools/presim_calibrate.py` to run grid searches that write `config/presim.conf` automatically.
+- `tools/presim_calibrate.py`: runs `build/bin/presim_e2e_test` across parameter combinations and collects full vs presim error/runtimes. Use `--use-openfoam` to enable the OpenFOAM wrapper when available.
+- `tools/openfoam_presim_wrapper.sh`: optional wrapper to invoke OpenFOAM and synthesize `presim.json` (falls back to `tools/python_solvers/thermal_high_fidelity.py` when OpenFOAM is unavailable).
+- `scripts/anonymize_repo.py`: helper to sanitize personal data (paths, emails, API keys) from the repository before sharing. Dry-run by default; pass `--apply` to modify files (creates `.bak` backups).
+
+Running a calibration (example):
+```
+export RUN_OPENFOAM=1
+python3 tools/presim_calibrate.py --runs 3 --use-openfoam
+```
+
+Notes on presim JSON produced by external tools:
+- Avoid embedding absolute home paths or timestamps with identifiable info; `scripts/anonymize_repo.py --apply` can help sanitize outputs before committing them to a repo or sharing.

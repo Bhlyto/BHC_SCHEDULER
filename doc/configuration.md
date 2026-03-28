@@ -380,3 +380,15 @@ Store this key — it will not be shown again.
 |---|---|---|
 | `--label "name"` | Human-readable label | `default` |
 | `--conf "path"` | Alternative config file | auto-detected |
+
+## Presimulation tuning
+
+Presimulation parameters are optionally stored in `config/presim.conf`. When present, the orchestrator loads `presim.conf` after `orchestrator.conf` and applies presim tuning without modifying core runtime settings.
+
+Common keys in `presim.conf`:
+- `threshold_max`: float — maximum acceptable per-zone error for presim selection.
+- `refine_mult`: float — multiplier controlling refinement aggressiveness.
+- `high_mult`: float — multiplier applied to high-fidelity runtime estimates.
+- `uncertainty_weight`: float — weight applied to zone uncertainty when ranking zones for refinement.
+
+Use `tools/presim_calibrate.py` to search for good values; the script can write the best-found parameters into `config/presim.conf`.

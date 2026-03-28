@@ -32,6 +32,7 @@ A lightweight daemon written in C that exposes a REST API for submitting, tracki
 - **Auto-cleanup** — work directories are deleted automatically after a configurable TTL
 - **Bulk purge** — single call to delete all finished/failed/cancelled jobs and their work directories
 - **Cross-platform** — runs as a Windows Service or Linux daemon
+ - **Presimulation (presim) workflow** — pluggable presim solvers (Python/OpenFOAM), a decision-core abstraction for refinement decisions, and a calibration harness to tune presim parameters for speed vs accuracy tradeoffs
 
 ---
 
@@ -88,6 +89,11 @@ cmake --build build
 | [Web UI](doc/web-ui.md) | Built-in browser interface — tabs, job submission, auto-refresh |
 | [PowerShell Examples](doc/examples.md) | Copy-paste examples for every API endpoint |
 | [Project Structure](doc/architecture.md) | Source tree and module overview |
+| [Presimulation Design & Tools](doc/presim.md) | Presim contract, solver integration, OpenFOAM wrapper, calibration harness, and tooling (`tools/presim_calibrate.py`, `tools/openfoam_presim_wrapper.sh`) |
+
+Other useful scripts:
+- `scripts/anonymize_repo.py` — sanitize repository artifacts before sharing (dry-run by default; `--apply` to modify files, creates `.bak` backups).
+- `scripts/verify_syntax.py` — quick syntax checker for Python/JSON/SH/C files used during repository maintenance.
 
 ---
 
