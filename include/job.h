@@ -3,13 +3,10 @@
 
 #include <time.h>
 
-/*
- * job.h
- * Job struct and state machine.
- */
-
-#define JOB_ID_LEN   37   /* UUID v4 string + null terminator */
+#define JOB_ID_LEN   37
 #define JOB_CMD_LEN  512
+#define JOB_USER_LEN 128
+#define JOB_APP_LEN  128
 
 typedef enum {
     JOB_STATUS_IN_QUEUE  = 0,
@@ -17,49 +14,52 @@ typedef enum {
     JOB_STATUS_RUNNING   = 2,
     JOB_STATUS_FINISHED  = 3,
     JOB_STATUS_CANCELLED = 4,
-    JOB_STATUS_FAILED    = 5
+    JOB_STATUS_FAILED    = 5,
+    JOB_STATUS_HELD      = 6
 } JobStatus;
 
 typedef struct {
     char       id[JOB_ID_LEN];
     char       command[JOB_CMD_LEN];
+    char       user_id[JOB_USER_LEN];
+    char       app_id[JOB_APP_LEN];
     JobStatus  status;
-    int        priority;        /* lower number = higher priority */
+    int        priority;
 
-    /* Resource requirements */
     int        req_cores;
     int        req_gpu;
     int        req_ram_mb;
     int        req_disk_mb;
 
-    /* Assigned machine */
-    char       machine_id[64];
+    char       machine_id[1024]; /* comma-separated; multi-machine jobs */
+    int        n_machines;
 
-    /* File transfer paths (set by transfer layer before executor launch) */
     char       input_dir[512];
     char       output_dir[512];
+    char       input_files[2048]; /* comma-separated expected filenames, empty = no hold */
 
-    /* Timing */
     time_t     submitted_at;
     time_t     started_at;
     time_t     ended_at;
 
-    /* Exit code from the spawned process */
     int        exit_code;
+    int        timeout_seconds; /* 0 = no timeout */
+    char       status_reason[256]; /* human-readable cause of the last status transition */
+    char       depends_on[2048]; /* comma-separated job IDs this job depends on */
+    char       workflow_id[64];  /* groups jobs submitted together via a workflow */
+    char       same_machine_as[JOB_ID_LEN]; /* job ID whose machine this job must reuse */
 } Job;
 
-/* Allocate and initialise a new Job. Caller must free with job_free(). */
 Job *job_create(const char *command, int priority,
                 int req_cores, int req_gpu,
                 int req_ram_mb, int req_disk_mb);
-
+Job *job_create_ex(const char *command, int priority,
+                   int req_cores, int req_gpu,
+                   int req_ram_mb, int req_disk_mb,
+                   const char *user_id, const char *app_id);
 void job_free(Job *job);
-
-/* Transition to new_status. Returns 0 on success, -1 if the transition is
-   not allowed by the state machine rules. Persists to DB automatically. */
-int job_set_status(Job *job, JobStatus new_status);
-
-/* Human-readable status string. */
+int  job_set_status(Job *job, JobStatus new_status);
+int  job_set_status_r(Job *job, JobStatus new_status, const char *reason);
 const char *job_status_str(JobStatus s);
 
 #endif /* JOB_H */

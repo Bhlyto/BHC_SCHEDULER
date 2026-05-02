@@ -1,6 +1,7 @@
 #include "job.h"
 #include "db.h"
 #include "log.h"
+#include "events.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -19,7 +20,7 @@
 #  include <fcntl.h>
 #  include <unistd.h>
    static void gen_uuid(char *out) {
-       /* Read 16 random bytes from /dev/urandom, format as UUID v4 */
+
        unsigned char b[16];
        int fd = open("/dev/urandom", O_RDONLY);
        if (fd < 0 || read(fd, b, 16) != 16) {
@@ -37,18 +38,13 @@
    }
 #endif
 
-/* Allowed state transitions:
-   IN_QUEUE  -> STARTING, CANCELLED
-   STARTING  -> RUNNING, FAILED, CANCELLED
-   RUNNING   -> FINISHED, FAILED
-   FINISHED, CANCELLED, FAILED -> (terminal, no transitions)
-*/
 static int transition_allowed(JobStatus from, JobStatus to)
 {
     switch (from) {
+        case JOB_STATUS_HELD:      return to == JOB_STATUS_IN_QUEUE   || to == JOB_STATUS_CANCELLED;
         case JOB_STATUS_IN_QUEUE:  return to == JOB_STATUS_STARTING  || to == JOB_STATUS_CANCELLED;
-        case JOB_STATUS_STARTING:  return to == JOB_STATUS_RUNNING    || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
-        case JOB_STATUS_RUNNING:   return to == JOB_STATUS_FINISHED   || to == JOB_STATUS_FAILED;
+        case JOB_STATUS_STARTING:  return to == JOB_STATUS_RUNNING   || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
+        case JOB_STATUS_RUNNING:   return to == JOB_STATUS_FINISHED  || to == JOB_STATUS_FAILED;
         default:                   return 0; /* terminal states */
     }
 }
@@ -56,6 +52,7 @@ static int transition_allowed(JobStatus from, JobStatus to)
 const char *job_status_str(JobStatus s)
 {
     switch (s) {
+        case JOB_STATUS_HELD:      return "HELD";
         case JOB_STATUS_IN_QUEUE:  return "IN_QUEUE";
         case JOB_STATUS_STARTING:  return "STARTING";
         case JOB_STATUS_RUNNING:   return "RUNNING";
@@ -70,11 +67,23 @@ Job *job_create(const char *command, int priority,
                 int req_cores, int req_gpu,
                 int req_ram_mb, int req_disk_mb)
 {
+    return job_create_ex(command, priority,
+                         req_cores, req_gpu, req_ram_mb, req_disk_mb,
+                         "", "");
+}
+
+Job *job_create_ex(const char *command, int priority,
+                   int req_cores, int req_gpu,
+                   int req_ram_mb, int req_disk_mb,
+                   const char *user_id, const char *app_id)
+{
     Job *job = (Job *)calloc(1, sizeof(Job));
     if (!job) return NULL;
 
     gen_uuid(job->id);
     strncpy(job->command, command, sizeof(job->command) - 1);
+    if (user_id) strncpy(job->user_id, user_id, sizeof(job->user_id) - 1);
+    if (app_id)  strncpy(job->app_id,  app_id,  sizeof(job->app_id)  - 1);
     job->status      = JOB_STATUS_IN_QUEUE;
     job->priority    = priority;
     job->req_cores   = req_cores  > 0 ? req_cores  : 1;
@@ -84,7 +93,8 @@ Job *job_create(const char *command, int priority,
     job->submitted_at = time(NULL);
 
     db_insert_job(job);
-    log_info("job", "Created job %s: %s", job->id, job->command);
+    log_info("job", "Created job %s: %s (user=%s app=%s)",
+             job->id, job->command, job->user_id, job->app_id);
     return job;
 }
 
@@ -95,15 +105,27 @@ void job_free(Job *job)
 
 int job_set_status(Job *job, JobStatus new_status)
 {
+    return job_set_status_r(job, new_status, "");
+}
+
+int job_set_status_r(Job *job, JobStatus new_status, const char *reason)
+{
     if (!transition_allowed(job->status, new_status)) {
         log_warn("job", "Invalid transition %s -> %s for job %s",
                  job_status_str(job->status), job_status_str(new_status), job->id);
         return -1;
     }
 
-    log_info("job", "Job %s: %s -> %s",
-             job->id, job_status_str(job->status), job_status_str(new_status));
+    if (reason && reason[0])
+        log_info("job", "Job %s: %s -> %s — %s",
+                 job->id, job_status_str(job->status),
+                 job_status_str(new_status), reason);
+    else
+        log_info("job", "Job %s: %s -> %s",
+                 job->id, job_status_str(job->status), job_status_str(new_status));
+
     job->status = new_status;
+    if (reason) strncpy(job->status_reason, reason, sizeof(job->status_reason) - 1);
 
     time_t now = time(NULL);
     switch (new_status) {
@@ -117,5 +139,17 @@ int job_set_status(Job *job, JobStatus new_status)
             db_update_job_status(job->id, new_status, 0, 0);
             break;
     }
+
+    if (reason && reason[0])
+        db_update_status_reason(job->id, reason);
+
+    char evt[EVENTS_JSON_MAX];
+    snprintf(evt, sizeof(evt),
+        "{\"event\":\"job_status\",\"id\":\"%s\",\"status\":\"%s\","
+        "\"machine_id\":\"%s\",\"reason\":\"%s\"}",
+        job->id, job_status_str(new_status), job->machine_id,
+        reason ? reason : "");
+    events_push(evt);
+
     return 0;
 }

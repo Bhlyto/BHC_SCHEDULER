@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Presim Config</title>
+  <style>body{font-family:Arial;margin:20px;}label{display:block;margin-top:8px}input{width:300px}</style>
+</head>
+<body>
+  <h2>Presim Runtime Settings</h2>
+  <div id="msg"></div>
+  <form id="cfg">
+    <label>Presim domains (comma-separated)
+      <input name="presim_domains" id="presim_domains" />
+    </label>
+    <label>Threshold max
+      <input name="presim_threshold_max" id="presim_threshold_max" type="number" step="0.001" />
+    </label>
+    <label>Refine multiplier
+      <input name="presim_refine_multiplier" id="presim_refine_multiplier" type="number" step="0.1" />
+    </label>
+    <label>High multiplier
+      <input name="presim_high_multiplier" id="presim_high_multiplier" type="number" step="0.1" />
+    </label>
+    <label>Uncertainty weight
+      <input name="presim_uncertainty_weight" id="presim_uncertainty_weight" type="number" step="0.1" />
+    </label>
+    <label>Fidelity map (CSV)
+      <input name="presim_fidelity_map" id="presim_fidelity_map" />
+    </label>
+    <button type="submit">Save</button>
+  </form>
+
+  <script>
+    async function load() {
+      const r = await fetch('/admin/presim-config');
+      if (!r.ok) { document.getElementById('msg').innerText = 'Failed to load config'; return; }
+      const j = await r.json();
+      document.getElementById('presim_domains').value = j.presim_domains || '';
+      document.getElementById('presim_threshold_max').value = j.presim_threshold_max || '';
+      document.getElementById('presim_refine_multiplier').value = j.presim_refine_multiplier || '';
+      document.getElementById('presim_high_multiplier').value = j.presim_high_multiplier || '';
+      document.getElementById('presim_uncertainty_weight').value = j.presim_uncertainty_weight || '';
+      document.getElementById('presim_fidelity_map').value = j.presim_fidelity_map || '';
+    }
+    document.getElementById('cfg').addEventListener('submit', async function(e){
+      e.preventDefault();
+      const body = {
+        presim_domains: document.getElementById('presim_domains').value,
+        presim_threshold_max: parseFloat(document.getElementById('presim_threshold_max').value),
+        presim_refine_multiplier: parseFloat(document.getElementById('presim_refine_multiplier').value),
+        presim_high_multiplier: parseFloat(document.getElementById('presim_high_multiplier').value),
+        presim_uncertainty_weight: parseFloat(document.getElementById('presim_uncertainty_weight').value),
+        presim_fidelity_map: document.getElementById('presim_fidelity_map').value
+      };
+      const r = await fetch('/admin/presim-config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if (r.ok) { document.getElementById('msg').innerText = 'Saved'; } else { document.getElementById('msg').innerText = 'Save failed'; }
+    });
+    load();
+  </script>
+</body>
+</html>

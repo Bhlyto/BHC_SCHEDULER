@@ -5,14 +5,6 @@
 #include <string.h>
 #include <stdio.h>
 
-/*
- * service_win.c
- * Registers with the Windows Service Control Manager (SCM).
- * Install via:  sc create orchestrator binPath= "C:\path\orchestrator.exe"
- * Start via:    sc start orchestrator  (or run directly with --console)
- */
-
-/* Forward declaration: implemented in main.c */
 void orchestrator_run(void);
 
 static volatile int              s_stop_requested = 0;
@@ -92,7 +84,6 @@ void platform_service_start(int argc, char **argv)
     if (!StartServiceCtrlDispatcherA(dispatch_table)) {
         DWORD err = GetLastError();
         if (err == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) {
-            /* Not launched as a service — fall back to console mode */
             log_info("platform", "Not running as service, falling back to console mode");
             orchestrator_run();
         } else {

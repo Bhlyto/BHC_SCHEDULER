@@ -5,16 +5,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/*
- * auth.c
- * Validates X-API-Key header using SHA-256 hashing compared against
- * the api_keys table in SQLite.
- *
- * SHA-256 implementation: uses a minimal public-domain implementation
- * embedded below to avoid external dependencies.
- */
+#ifdef _WIN32
+#  include <windows.h>
+#  include <wincrypt.h>
+#endif
 
-/* ── Minimal SHA-256 (public domain by Brad Conte) ──────────────── */
+/* SHA-256 (public domain, Brad Conte) */
 #include <stdint.h>
 #define SHA256_BLOCK_SIZE 32
 
@@ -98,7 +94,6 @@ static void sha256_final(SHA256_CTX *ctx,uint8_t hash[]){
     }
 }
 
-/* Hash a string → hex string (65 bytes including null). */
 static void sha256_hex(const char *input, char *out_hex)
 {
     SHA256_CTX ctx;
@@ -112,9 +107,11 @@ static void sha256_hex(const char *input, char *out_hex)
 }
 
 /* ── Public API ──────────────────────────────────────────────────── */
-int auth_check(struct mg_connection *c, struct mg_http_message *hm)
+
+/* Shared helper: extract key from header, hash it, fill out_hash (65 bytes).
+   Returns 1 on success, 0 if header is missing. */
+static int extract_key_hash(struct mg_http_message *hm, char *out_hash)
 {
-    (void)c;
     struct mg_str *hdr = mg_http_get_header(hm, "X-API-Key");
     if (!hdr || hdr->len == 0) {
         log_warn("auth", "Missing X-API-Key header");
@@ -126,16 +123,112 @@ int auth_check(struct mg_connection *c, struct mg_http_message *hm)
     memcpy(raw_key, hdr->buf, klen);
     raw_key[klen] = '\0';
 
+    sha256_hex(raw_key, out_hash);
+    return 1;
+}
+
+int auth_check(struct mg_connection *c, struct mg_http_message *hm)
+{
+    (void)c;
     char hash[65];
-    sha256_hex(raw_key, hash);
+    if (!extract_key_hash(hm, hash)) return 0;
 
     int valid = db_validate_api_key(hash);
-    if (!valid) log_warn("auth", "Invalid API key (hash=%s...)", hash);
+    if (!valid) log_warn("auth", "Invalid API key (hash=%.8s...)", hash);
     return valid;
 }
 
-/* For CLI key generation: hash a raw key string. */
+int auth_check_role(struct mg_connection *c, struct mg_http_message *hm,
+                    char *out_role)
+{
+    char uid[128] = {0};
+    return auth_check_role_user(c, hm, out_role, uid);
+}
+
+int auth_check_role_user(struct mg_connection *c, struct mg_http_message *hm,
+                         char *out_role, char *out_user_id)
+{
+    (void)c;
+    char hash[65];
+    if (!extract_key_hash(hm, hash)) return 0;
+
+    int valid = db_resolve_api_key_full(hash, out_role, out_user_id, 128);
+    if (!valid) log_warn("auth", "Invalid or expired API key (hash=%.8s...)", hash);
+    return valid;
+}
+
 void auth_hash_key(const char *raw_key, char *out_hex_65)
 {
     sha256_hex(raw_key, out_hex_65);
+}
+
+/* ── Salted password hashing ─────────────────────────────────────── */
+
+void auth_hash_password(const char *password, char *out_buf)
+{
+    unsigned char salt_bytes[16];
+#ifdef _WIN32
+    {
+        HCRYPTPROV hprov;
+        CryptAcquireContextA(&hprov, NULL, NULL, PROV_RSA_FULL,
+                             CRYPT_VERIFYCONTEXT);
+        CryptGenRandom(hprov, sizeof(salt_bytes), salt_bytes);
+        CryptReleaseContext(hprov, 0);
+    }
+#else
+    {
+        FILE *urnd = fopen("/dev/urandom", "rb");
+        if (urnd) {
+            fread(salt_bytes, 1, sizeof(salt_bytes), urnd);
+            fclose(urnd);
+        }
+    }
+#endif
+
+    char salt_hex[33] = {0};
+    for (int i = 0; i < 16; i++)
+        sprintf(salt_hex + i * 2, "%02x", salt_bytes[i]);
+
+    char salted[580];
+    snprintf(salted, sizeof(salted), "%s%s", salt_hex, password);
+    char hash_hex[65];
+    sha256_hex(salted, hash_hex);
+
+    /* Output format: "<32-char-salt>$<64-char-hash>" (97 chars + NUL) */
+    snprintf(out_buf, 98, "%s$%s", salt_hex, hash_hex);
+}
+
+/* Constant-time comparison to prevent timing side-channels */
+static int ct_compare(const char *a, const char *b, size_t len)
+{
+    volatile unsigned char result = 0;
+    for (size_t i = 0; i < len; i++)
+        result |= (unsigned char)a[i] ^ (unsigned char)b[i];
+    return result == 0;
+}
+
+int auth_verify_password(const char *password, const char *stored)
+{
+    const char *dollar = strchr(stored, '$');
+    if (!dollar) {
+        /* Legacy unsalted hash — plain SHA-256 comparison */
+        char hash[65];
+        sha256_hex(password, hash);
+        if (strlen(hash) != strlen(stored)) return 0;
+        return ct_compare(hash, stored, strlen(hash));
+    }
+
+    int salt_len = (int)(dollar - stored);
+    if (salt_len <= 0 || salt_len > 32) return 0;
+
+    char salt[33] = {0};
+    memcpy(salt, stored, salt_len);
+
+    const char *expected = dollar + 1;
+    char salted[580];
+    snprintf(salted, sizeof(salted), "%s%s", salt, password);
+    char hash[65];
+    sha256_hex(salted, hash);
+    if (strlen(hash) != strlen(expected)) return 0;
+    return ct_compare(hash, expected, strlen(hash));
 }

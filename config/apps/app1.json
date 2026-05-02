@@ -1,0 +1,14 @@
+{
+  "app_id": "app1",
+  "name": "Simulation Engine",
+  "command_template": "sim_engine.exe",
+  "req_cores": 4,
+  "req_ram_mb": 8192,
+  "req_disk_mb": 2048,
+  "req_gpu": 0,
+  "fields": [
+    { "name": "enable_logging", "type": "checkbox", "label": "Enable detailed logging", "default": false },
+    { "name": "parallel_mode", "type": "checkbox", "label": "Parallel processing", "default": true },
+    { "name": "dry_run", "type": "checkbox", "label": "Dry run (no output)", "default": false }
+  ]
+}

@@ -1,4 +1,4 @@
-{
+﻿{
   "machines": [
     {
       "id":        "local",
@@ -7,8 +7,42 @@
       "enabled":   true,
       "cores":     4,
       "gpu_count": 0,
+      "ram_mb":    16384,
+      "disk_mb":   102400,
+      "type":      "static",
+      "mac_address": "",
+      "cores_min":   0,
+      "ram_mb_min":  0,
+      "disk_mb_min": 0
+    },
+    {
+      "id":        "worker-01",
+      "hostname":  "worker-01.local",
+      "ip":        "10.0.0.1",
+      "enabled":   false,
+      "cores":     4,
+      "gpu_count": 0,
       "ram_mb":    8192,
-      "disk_mb":   102400
+      "disk_mb":   102400,
+      "type":      "static",
+      "mac_address": "AA:BB:CC:DD:EE:01",
+      "cores_min":   0,
+      "ram_mb_min":  0,
+      "disk_mb_min": 0
+    }
+  ],
+  "pools": [
+    {
+      "id_prefix":       "node-",
+      "hostname_format": "node-%03d.local",
+      "ip_format":       "10.0.1.%d",
+      "range_start":     1,
+      "range_end":       10,
+      "enabled":         false,
+      "cores":           4,
+      "gpu_count":       0,
+      "ram_mb":          8192,
+      "disk_mb":         102400
     }
   ]
 }

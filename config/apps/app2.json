@@ -1,0 +1,13 @@
+{
+  "app_id": "app2",
+  "name": "Data Processor",
+  "command_template": "data_proc.exe",
+  "req_cores": 2,
+  "req_ram_mb": 4096,
+  "req_disk_mb": 512,
+  "req_gpu": 1,
+  "fields": [
+    { "name": "algorithm", "type": "select", "label": "Algorithm", "options": ["fast", "accurate", "balanced"], "default": "balanced" },
+    { "name": "verbose", "type": "checkbox", "label": "Verbose output", "default": false }
+  ]
+}

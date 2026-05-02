@@ -17,13 +17,6 @@
 #  define SEP "/"
 #endif
 
-/*
- * store.c
- * Manage the filesystem workspace for each job:
- *   <work_dir>/<job_id>/input/
- *   <work_dir>/<job_id>/output/
- */
-
 static void make_dir(const char *path)
 {
     /* Create each component of path if missing */
@@ -34,7 +27,7 @@ static void make_dir(const char *path)
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/' || *p == '\\') {
             *p = '\0';
-            MKDIR(tmp);  /* ignore errors — dir may already exist */
+            MKDIR(tmp);
             *p = SEP[0];
         }
     }
@@ -51,6 +44,16 @@ void store_output_dir(const char *job_id, char *buf, int len)
     snprintf(buf, len, "%s%s%s%soutput", g_config.work_dir, SEP, job_id, SEP);
 }
 
+void store_stdout_path(const char *job_id, char *buf, int len)
+{
+    snprintf(buf, len, "%s%s%s%sstdout.log", g_config.work_dir, SEP, job_id, SEP);
+}
+
+void store_stderr_path(const char *job_id, char *buf, int len)
+{
+    snprintf(buf, len, "%s%s%s%sstderr.log", g_config.work_dir, SEP, job_id, SEP);
+}
+
 int store_init_job_dirs(const char *job_id)
 {
     char path[512];
@@ -62,7 +65,66 @@ int store_init_job_dirs(const char *job_id)
     return 0;
 }
 
-/* Recursively delete a directory tree (portable simple version) */
+/* Copy a single file from src to dst (binary-safe). */
+static int copy_file(const char *src, const char *dst)
+{
+    FILE *fin = fopen(src, "rb");
+    if (!fin) return -1;
+    FILE *fout = fopen(dst, "wb");
+    if (!fout) { fclose(fin); return -1; }
+    char buf[8192];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), fin)) > 0)
+        fwrite(buf, 1, n, fout);
+    fclose(fin);
+    fclose(fout);
+    return 0;
+}
+
+int store_forward_outputs(const char *parent_job_id, const char *child_job_id)
+{
+    char src_dir[512], dst_dir[512];
+    store_output_dir(parent_job_id, src_dir, sizeof(src_dir));
+    store_input_dir(child_job_id,   dst_dir, sizeof(dst_dir));
+    make_dir(dst_dir);
+
+    int copied = 0;
+#ifdef _WIN32
+    char pattern[512];
+    snprintf(pattern, sizeof(pattern), "%s\\*", src_dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        char src_path[512], dst_path[512];
+        snprintf(src_path, sizeof(src_path), "%s\\%s", src_dir, fd.cFileName);
+        snprintf(dst_path, sizeof(dst_path), "%s\\%s", dst_dir, fd.cFileName);
+        if (copy_file(src_path, dst_path) == 0) copied++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR *d = opendir(src_dir);
+    if (!d) return 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char src_path[512], dst_path[512];
+        snprintf(src_path, sizeof(src_path), "%s/%s", src_dir, e->d_name);
+        struct stat st;
+        if (stat(src_path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, e->d_name);
+        if (copy_file(src_path, dst_path) == 0) copied++;
+    }
+    closedir(d);
+#endif
+    if (copied > 0)
+        log_info("store", "Forwarded %d file(s) from job %s output to job %s input",
+                 copied, parent_job_id, child_job_id);
+    return copied;
+}
+
 #ifdef _WIN32
 static void rmdir_r(const char *path)
 {

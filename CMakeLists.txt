@@ -31,7 +31,7 @@ set(VENDOR_SOURCES
 # ──────────────────────────────────────────────
 if(WIN32)
     set(PLATFORM_SOURCES src/platform/service_win.c)
-    set(PLATFORM_LIBS ws2_32)
+    set(PLATFORM_LIBS ws2_32 advapi32 rpcrt4)
 else()
     set(PLATFORM_SOURCES src/platform/service_linux.c)
     set(PLATFORM_LIBS pthread dl m)
@@ -58,6 +58,10 @@ set(CORE_SOURCES
     src/http/routes.c
     src/http/response.c
     src/http/httpd.c
+    src/http/events.c
+    src/cloud/cloud.c
+    src/decision_core_default.c
+    src/solvers/thermal/thermal_solver.c
 )
 
 # ──────────────────────────────────────────────
@@ -70,22 +74,66 @@ add_executable(orchestrator
     ${VENDOR_SOURCES}
 )
 
+add_executable(dc_test
+    src/tools/dc_test.c
+    ${CORE_SOURCES}
+    ${VENDOR_SOURCES}
+)
+target_include_directories(dc_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(dc_test ${PLATFORM_LIBS})
+
 target_link_libraries(orchestrator ${PLATFORM_LIBS})
+
+add_executable(presim_runner
+    src/tools/presim_runner.c
+    src/solvers/thermal/thermal_solver.c
+)
+target_include_directories(presim_runner PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(UNIX)
+    target_link_libraries(presim_runner pthread dl m)
+endif()
+
+add_executable(presim_e2e_test
+    src/tools/presim_e2e_test.c
+    ${CORE_SOURCES}
+    ${VENDOR_SOURCES}
+)
+target_include_directories(presim_e2e_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(presim_e2e_test ${PLATFORM_LIBS})
+
+# Copy config/ next to the executable after each build
+add_custom_command(TARGET orchestrator POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/config"
+        "$<TARGET_FILE_DIR:orchestrator>/config"
+    COMMENT "Copying config/ to output directory"
+)
+
+# Copy web/ next to the executable after each build
+add_custom_command(TARGET orchestrator POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/web"
+        "$<TARGET_FILE_DIR:orchestrator>/web"
+    COMMENT "Copying web/ to output directory"
+)
 
 # SQLite needs these on Linux
 if(UNIX)
     target_link_libraries(orchestrator pthread dl m)
 endif()
 
-# Mongoose TLS optional — disabled by default (set MG_TLS=MG_TLS_NONE)
+# Mongoose TLS optional — disabled by default
+# MG_ARCH is set explicitly to avoid the conditional #include "mongoose_config.h"
+# which would fail on platforms where the file is absent.
 target_compile_definitions(orchestrator PRIVATE
     MG_TLS=0
-    MG_ARCH=0          # auto-detect
     SQLITE_THREADSAFE=1
 )
 
 if(WIN32)
-    target_compile_definitions(orchestrator PRIVATE _WIN32_WINNT=0x0601)
+    target_compile_definitions(orchestrator PRIVATE MG_ARCH=2 _WIN32_WINNT=0x0601)  # MG_ARCH_WIN32
+else()
+    target_compile_definitions(orchestrator PRIVATE MG_ARCH=1)  # MG_ARCH_UNIX
 endif()
 
 # ──────────────────────────────────────────────

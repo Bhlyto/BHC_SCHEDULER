@@ -2681,7 +2681,7 @@ extern "C" {
     decrypted by knowing the key, nonce and associated data.
 
     input:
-        - key: RFC_8439_KEY_SIZE bytes that all parties have agreed
+        - key: REDACTED bytes that all parties have agreed
             upon beforehand
         - nonce: RFC_8439_NONCE_SIZE bytes that should never be repeated
             for the same key. A counter or a pseudo-random value are fine.
@@ -2707,7 +2707,7 @@ PORTABLE_8439_DECL size_t mg_chacha20_poly1305_encrypt(
     Decrypt/unseal cipher text given the right key, nonce, and additional data.
 
     input:
-        - key: RFC_8439_KEY_SIZE bytes that all parties have agreed
+        - key: REDACTED bytes that all parties have agreed
             upon beforehand
         - nonce: RFC_8439_NONCE_SIZE bytes that should never be repeated for
             the same key. A counter or a pseudo-random value are fine.
