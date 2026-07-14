@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 static sqlite3 *s_db = NULL;
+static int s_transaction_active = 0;
 
 
 static const char *SCHEMA =
@@ -40,15 +41,17 @@ static const char *SCHEMA =
     ");"
 
     "CREATE TABLE IF NOT EXISTS allocations ("
-    "  job_id      TEXT PRIMARY KEY,"
+    "  job_id      TEXT NOT NULL,"
     "  machine_id  TEXT NOT NULL,"
     "  cores       INTEGER NOT NULL DEFAULT 0,"
     "  gpu         INTEGER NOT NULL DEFAULT 0,"
     "  ram_mb      INTEGER NOT NULL DEFAULT 0,"
     "  disk_mb     INTEGER NOT NULL DEFAULT 0,"
     "  allocated_at INTEGER,"
-    "  released_at  INTEGER"
+    "  released_at  INTEGER,"
+    "  PRIMARY KEY (job_id, machine_id)"
     ");"
+    "CREATE INDEX IF NOT EXISTS idx_allocations_active ON allocations(released_at);"
 
     "CREATE TABLE IF NOT EXISTS audit_log ("
     "  id        INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -103,14 +106,64 @@ static const char *SCHEMA =
     "  created_at  INTEGER NOT NULL DEFAULT 0"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_events_cat ON events(category, created_at);"
-    "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(created_at);";
+    "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(created_at);"
+
+    "CREATE TABLE IF NOT EXISTS submission_keys ("
+    "  user_id         TEXT NOT NULL,"
+    "  idempotency_key TEXT NOT NULL,"
+    "  job_id          TEXT NOT NULL,"
+    "  created_at      INTEGER NOT NULL DEFAULT 0,"
+    "  PRIMARY KEY (user_id, idempotency_key)"
+    ");";
+
+static int migrate_allocations_schema(void)
+{
+    sqlite3_stmt *columns = NULL;
+    int machine_id_in_primary_key = 0;
+    if (sqlite3_prepare_v2(s_db, "PRAGMA table_info(allocations);", -1,
+                           &columns, NULL) != SQLITE_OK) return -1;
+    while (sqlite3_step(columns) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(columns, 1);
+        int primary_key_position = sqlite3_column_int(columns, 5);
+        if (name && strcmp(name, "machine_id") == 0 && primary_key_position > 0)
+            machine_id_in_primary_key = 1;
+    }
+    sqlite3_finalize(columns);
+    if (machine_id_in_primary_key) return 0;
+
+    const char *migration =
+        "BEGIN IMMEDIATE;"
+        "ALTER TABLE allocations RENAME TO allocations_legacy;"
+        "DROP INDEX IF EXISTS idx_allocations_active;"
+        "CREATE TABLE allocations ("
+        "job_id TEXT NOT NULL,machine_id TEXT NOT NULL,cores INTEGER NOT NULL DEFAULT 0,"
+        "gpu INTEGER NOT NULL DEFAULT 0,ram_mb INTEGER NOT NULL DEFAULT 0,"
+        "disk_mb INTEGER NOT NULL DEFAULT 0,allocated_at INTEGER,released_at INTEGER,"
+        "PRIMARY KEY(job_id,machine_id));"
+        "INSERT OR REPLACE INTO allocations(job_id,machine_id,cores,gpu,ram_mb,disk_mb,allocated_at,released_at) "
+        "SELECT job_id,machine_id,cores,gpu,ram_mb,disk_mb,allocated_at,released_at FROM allocations_legacy;"
+        "DROP TABLE allocations_legacy;"
+        "CREATE INDEX IF NOT EXISTS idx_allocations_active ON allocations(released_at);"
+        "COMMIT;";
+    char *error = NULL;
+    if (sqlite3_exec(s_db, migration, NULL, NULL, &error) != SQLITE_OK) {
+        fprintf(stderr, "[db] allocations migration: %s\n", error ? error : "unknown error");
+        sqlite3_free(error);
+        sqlite3_exec(s_db, "ROLLBACK;", NULL, NULL, NULL);
+        return -1;
+    }
+    return 0;
+}
 
 int db_open(const char *path)
 {
-    if (sqlite3_open(path, &s_db) != SQLITE_OK) {
+    if (sqlite3_open_v2(path, &s_db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                        NULL) != SQLITE_OK) {
         fprintf(stderr, "[db] sqlite3_open: %s\n", sqlite3_errmsg(s_db));
         return -1;
     }
+    sqlite3_busy_timeout(s_db, 5000);
     sqlite3_exec(s_db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
     char *errmsg = NULL;
     if (sqlite3_exec(s_db, SCHEMA, NULL, NULL, &errmsg) != SQLITE_OK) {
@@ -160,12 +213,49 @@ int db_open(const char *path)
     sqlite3_exec(s_db,
         "ALTER TABLE jobs ADD COLUMN same_machine_as TEXT NOT NULL DEFAULT '';",
         NULL, NULL, NULL);
+    if (migrate_allocations_schema() != 0) return -1;
     return 0;
 }
 
 void db_close(void)
 {
     if (s_db) { sqlite3_close(s_db); s_db = NULL; }
+}
+
+int db_begin(void)
+{
+    if (!s_db) return -1;
+    sqlite3_mutex_enter(sqlite3_db_mutex(s_db));
+    if (s_transaction_active) {
+        sqlite3_mutex_leave(sqlite3_db_mutex(s_db));
+        return -1;
+    }
+    if (sqlite3_exec(s_db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_mutex_leave(sqlite3_db_mutex(s_db));
+        return -1;
+    }
+    s_transaction_active = 1;
+    return 0;
+}
+
+int db_commit(void)
+{
+    if (!s_db || !s_transaction_active) return -1;
+    int rc = sqlite3_exec(s_db, "COMMIT;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK)
+        sqlite3_exec(s_db, "ROLLBACK;", NULL, NULL, NULL);
+    s_transaction_active = 0;
+    sqlite3_mutex_leave(sqlite3_db_mutex(s_db));
+    return rc == SQLITE_OK ? 0 : -1;
+}
+
+int db_rollback(void)
+{
+    if (!s_db || !s_transaction_active) return -1;
+    int rc = sqlite3_exec(s_db, "ROLLBACK;", NULL, NULL, NULL);
+    s_transaction_active = 0;
+    sqlite3_mutex_leave(sqlite3_db_mutex(s_db));
+    return rc == SQLITE_OK ? 0 : -1;
 }
 
 int db_insert_job(const Job *job)
@@ -263,6 +353,69 @@ static Job *row_to_job(sqlite3_stmt *st)
     return job;
 }
 
+int db_load_jobs_by_status(JobStatus status, Job **out_jobs)
+{
+    if (!out_jobs) return -1;
+    *out_jobs = NULL;
+
+    sqlite3_stmt *count_statement;
+    if (sqlite3_prepare_v2(s_db, "SELECT COUNT(*) FROM jobs WHERE status=?;", -1,
+                           &count_statement, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int(count_statement, 1, status);
+    int expected = 0;
+    if (sqlite3_step(count_statement) == SQLITE_ROW)
+        expected = sqlite3_column_int(count_statement, 0);
+    sqlite3_finalize(count_statement);
+    if (expected <= 0) return 0;
+
+    Job *jobs = (Job *)calloc((size_t)expected, sizeof(Job));
+    if (!jobs) return -1;
+    const char *sql =
+        "SELECT id,command,status,priority,req_cores,req_gpu,req_ram_mb,"
+        "req_disk_mb,machine_id,input_dir,output_dir,exit_code,"
+        "submitted_at,started_at,ended_at,input_files,timeout_seconds,status_reason,"
+        "user_id,app_id,depends_on,workflow_id,same_machine_as FROM jobs "
+        "WHERE status=? ORDER BY priority ASC,submitted_at ASC;";
+    sqlite3_stmt *statement;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &statement, NULL) != SQLITE_OK) {
+        free(jobs);
+        return -1;
+    }
+    sqlite3_bind_int(statement, 1, status);
+    int count = 0;
+    while (count < expected && sqlite3_step(statement) == SQLITE_ROW) {
+        Job *job = row_to_job(statement);
+        if (job) {
+            jobs[count++] = *job;
+            free(job);
+        }
+    }
+    sqlite3_finalize(statement);
+    *out_jobs = jobs;
+    return count;
+}
+
+int db_recover_after_restart(void)
+{
+    if (db_begin() != 0) return -1;
+    const char *interrupt_sql =
+        "UPDATE jobs SET status=5,exit_code=-1,ended_at=strftime('%s','now'),"
+        "status_reason='Interrupted by orchestrator restart' WHERE status IN (1,2);";
+    if (sqlite3_exec(s_db, interrupt_sql, NULL, NULL, NULL) != SQLITE_OK) {
+        db_rollback();
+        return -1;
+    }
+    int interrupted = sqlite3_changes(s_db);
+    if (sqlite3_exec(s_db,
+                     "UPDATE allocations SET released_at=strftime('%s','now') WHERE released_at IS NULL;",
+                     NULL, NULL, NULL) != SQLITE_OK) {
+        db_rollback();
+        return -1;
+    }
+    if (db_commit() != 0) return -1;
+    return interrupted;
+}
+
 Job *db_get_job(const char *job_id)
 {
     const char *sql =
@@ -296,6 +449,100 @@ int db_list_jobs(Job *jobs, int max_count)
     }
     sqlite3_finalize(st);
     return count;
+}
+
+int db_query_jobs(const char *user_id, int status, const char *app_id,
+                  int limit, int offset, Job **out_jobs)
+{
+    if (!out_jobs || limit < 1 || offset < 0) return -1;
+    *out_jobs = NULL;
+    const char *sql =
+        "SELECT id,command,status,priority,req_cores,req_gpu,req_ram_mb,"
+        "req_disk_mb,machine_id,input_dir,output_dir,exit_code,"
+        "submitted_at,started_at,ended_at,input_files,timeout_seconds,status_reason,"
+        "user_id,app_id,depends_on,workflow_id,same_machine_as FROM jobs "
+        "WHERE (?1='' OR user_id=?1) AND (?2<0 OR status=?2) "
+        "AND (?3='' OR app_id=?3) "
+        "ORDER BY submitted_at DESC LIMIT ?4 OFFSET ?5;";
+    sqlite3_stmt *statement = NULL;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &statement, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(statement, 1, user_id ? user_id : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement, 2, status);
+    sqlite3_bind_text(statement, 3, app_id ? app_id : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement, 4, limit);
+    sqlite3_bind_int(statement, 5, offset);
+
+    Job *jobs = (Job *)calloc((size_t)limit, sizeof(Job));
+    if (!jobs) {
+        sqlite3_finalize(statement);
+        return -1;
+    }
+    int count = 0;
+    int step_result = SQLITE_ROW;
+    while (count < limit && (step_result = sqlite3_step(statement)) == SQLITE_ROW) {
+        Job *job = row_to_job(statement);
+        if (!job) {
+            free(jobs);
+            sqlite3_finalize(statement);
+            return -1;
+        }
+        jobs[count++] = *job;
+        free(job);
+    }
+    sqlite3_finalize(statement);
+    if (step_result != SQLITE_DONE && count < limit) {
+        free(jobs);
+        return -1;
+    }
+    if (count == 0) {
+        free(jobs);
+        return 0;
+    }
+    *out_jobs = jobs;
+    return count;
+}
+
+int db_get_submission_job(const char *user_id, const char *idempotency_key,
+                          char *out_job_id, int out_len)
+{
+    if (!user_id || !idempotency_key || !out_job_id || out_len < 1) return -1;
+    out_job_id[0] = '\0';
+    const char *sql =
+        "SELECT s.job_id FROM submission_keys s "
+        "INNER JOIN jobs j ON j.id=s.job_id "
+        "WHERE s.user_id=? AND s.idempotency_key=?;";
+    sqlite3_stmt *statement = NULL;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &statement, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(statement, 1, user_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, idempotency_key, -1, SQLITE_TRANSIENT);
+    int result = sqlite3_step(statement);
+    if (result == SQLITE_ROW) {
+        const char *job_id = (const char *)sqlite3_column_text(statement, 0);
+        if (job_id) {
+            strncpy(out_job_id, job_id, (size_t)out_len - 1);
+            out_job_id[out_len - 1] = '\0';
+        }
+        sqlite3_finalize(statement);
+        return 1;
+    }
+    sqlite3_finalize(statement);
+    return result == SQLITE_DONE ? 0 : -1;
+}
+
+int db_store_submission_key(const char *user_id, const char *idempotency_key,
+                            const char *job_id)
+{
+    const char *sql =
+        "INSERT OR REPLACE INTO submission_keys(user_id,idempotency_key,job_id,created_at) "
+        "VALUES(?,?,?,strftime('%s','now'));";
+    sqlite3_stmt *statement = NULL;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &statement, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(statement, 1, user_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, idempotency_key, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 3, job_id, -1, SQLITE_TRANSIENT);
+    int result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    return result == SQLITE_DONE ? 0 : -1;
 }
 
 int db_list_held_jobs(Job *jobs, int max_count)
@@ -453,8 +700,8 @@ int db_insert_allocation(const char *job_id, const char *machine_id,
 {
     const char *sql =
         "INSERT OR REPLACE INTO allocations"
-        "(job_id,machine_id,cores,gpu,ram_mb,disk_mb,allocated_at)"
-        " VALUES(?,?,?,?,?,?,strftime('%s','now'));";
+        "(job_id,machine_id,cores,gpu,ram_mb,disk_mb,allocated_at,released_at)"
+        " VALUES(?,?,?,?,?,?,strftime('%s','now'),NULL);";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text(st, 1, job_id,     -1, SQLITE_STATIC);
@@ -626,12 +873,28 @@ int db_job_stats(JobStats *out)
 
 int db_purge_jobs(void)
 {
-    const char *sql = "DELETE FROM jobs WHERE status IN (3, 4, 5);";
-    sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
-    sqlite3_step(st);
-    int deleted = sqlite3_changes(s_db);
-    sqlite3_finalize(st);
+    if (db_begin() != 0) return -1;
+    const char *cleanup_sql =
+        "DELETE FROM submission_keys WHERE job_id IN "
+        "(SELECT id FROM jobs WHERE status IN (3, 4, 5));";
+    if (sqlite3_exec(s_db, cleanup_sql, NULL, NULL, NULL) != SQLITE_OK) {
+        db_rollback();
+        return -1;
+    }
+    sqlite3_stmt *statement = NULL;
+    if (sqlite3_prepare_v2(s_db,
+            "DELETE FROM jobs WHERE status IN (3, 4, 5);",
+            -1, &statement, NULL) != SQLITE_OK) {
+        db_rollback();
+        return -1;
+    }
+    int result = sqlite3_step(statement);
+    int deleted = result == SQLITE_DONE ? sqlite3_changes(s_db) : -1;
+    sqlite3_finalize(statement);
+    if (deleted < 0 || db_commit() != 0) {
+        db_rollback();
+        return -1;
+    }
     return deleted;
 }
 
@@ -1417,4 +1680,27 @@ int db_report_per_machine(MachineReport *out, int max_count,
     }
     sqlite3_finalize(st);
     return count;
+}
+
+int db_update_job_submission(const Job *job)
+{
+    const char *sql =
+        "UPDATE jobs SET status=?,input_dir=?,output_dir=?,input_files=?,"
+        "timeout_seconds=?,status_reason=?,depends_on=?,workflow_id=?,same_machine_as=? "
+        "WHERE id=?;";
+    sqlite3_stmt *st;
+    if (!job || sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int (st, 1, job->status);
+    sqlite3_bind_text(st, 2, job->input_dir, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, job->output_dir, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, job->input_files, -1, SQLITE_STATIC);
+    sqlite3_bind_int (st, 5, job->timeout_seconds);
+    sqlite3_bind_text(st, 6, job->status_reason, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 7, job->depends_on, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 8, job->workflow_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 9, job->same_machine_as, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 10, job->id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE && sqlite3_changes(s_db) == 1 ? 0 : -1;
 }

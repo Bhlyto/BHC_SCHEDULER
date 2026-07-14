@@ -18,12 +18,12 @@
     <input type="text" id="loginUser" placeholder="user_id" autocomplete="username">
     <label>Password</label>
     <input type="password" id="loginPass" placeholder="password" autocomplete="current-password">
-    <button class="btn btn-primary btn-full" onclick="doLogin()">Sign In</button>
+    <button class="btn btn-primary btn-full" data-action="login">Sign In</button>
     <div style="margin-top:16px; text-align:center;">
       <span style="font-size:13px;color:var(--text2)">or use an API key</span>
     </div>
     <input type="text" id="loginApiKey" placeholder="X-API-Key" style="margin-top:8px">
-    <button class="btn btn-outline btn-full" onclick="doApiKeyLogin()">Connect with API Key</button>
+    <button class="btn btn-outline btn-full" data-action="api-key-login">Connect with API Key</button>
   </div>
 </div>
 
@@ -33,20 +33,20 @@
     <h1>BHC Orchestrator</h1>
     <div class="topbar-right">
       <span id="userInfo"></span>
-      <button class="btn btn-sm btn-outline" onclick="showChangePassword()">Password</button>
-      <button class="btn btn-sm btn-outline" onclick="doLogout()">Logout</button>
+      <button class="btn btn-sm btn-outline" data-action="show-change-password">Password</button>
+      <button class="btn btn-sm btn-outline" data-action="logout">Logout</button>
     </div>
   </div>
   <div class="nav" id="navBar">
-    <button class="nav-btn active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
-    <button class="nav-btn" data-tab="jobs" onclick="switchTab('jobs')">Jobs</button>
-    <button class="nav-btn admin-only" data-tab="users" onclick="switchTab('users')">Users</button>
-    <button class="nav-btn admin-only" data-tab="keys" onclick="switchTab('keys')">API Keys</button>
-    <button class="nav-btn admin-only" data-tab="quotas" onclick="switchTab('quotas')">Quotas</button>
-    <button class="nav-btn admin-only" data-tab="apps" onclick="switchTab('apps')">Apps</button>
-    <button class="nav-btn" data-tab="workflows" onclick="switchTab('workflows')">Workflows</button>
-    <button class="nav-btn admin-only" data-tab="reports" onclick="switchTab('reports')">Reports</button>
-    <button class="nav-btn admin-only" data-tab="machines" onclick="switchTab('machines')">Machines</button>
+    <button class="nav-btn active" data-tab="dashboard" data-action="switch-tab">Dashboard</button>
+    <button class="nav-btn" data-tab="jobs" data-action="switch-tab">Jobs</button>
+    <button class="nav-btn admin-only" data-tab="users" data-action="switch-tab">Users</button>
+    <button class="nav-btn admin-only" data-tab="keys" data-action="switch-tab">API Keys</button>
+    <button class="nav-btn admin-only" data-tab="quotas" data-action="switch-tab">Quotas</button>
+    <button class="nav-btn admin-only" data-tab="apps" data-action="switch-tab">Apps</button>
+    <button class="nav-btn" data-tab="workflows" data-action="switch-tab">Workflows</button>
+    <button class="nav-btn admin-only" data-tab="reports" data-action="switch-tab">Reports</button>
+    <button class="nav-btn admin-only" data-tab="machines" data-action="switch-tab">Machines</button>
   </div>
   <div class="content">
     <!-- Dashboard -->
@@ -64,9 +64,9 @@
         <div class="card-header">
           <h2>Jobs</h2>
           <div style="display:flex;gap:8px">
-            <button class="btn btn-sm btn-primary" onclick="showSubmitJob()">Submit Job</button>
-            <button class="btn btn-sm btn-outline" onclick="loadJobs()">Refresh</button>
-            <button class="btn btn-sm btn-danger admin-only" onclick="purgeJobs()" style="display:none">Purge Finished</button>
+            <button class="btn btn-sm btn-primary" data-action="show-submit-job">Submit Job</button>
+            <button class="btn btn-sm btn-outline" data-action="load-jobs">Refresh</button>
+            <button class="btn btn-sm btn-danger admin-only" data-action="purge-jobs" style="display:none">Purge Finished</button>
           </div>
         </div>
         <table><thead><tr><th>ID</th><th>Command</th><th>Status</th><th>App</th><th>User</th><th>Submitted</th><th>Actions</th></tr></thead>
@@ -78,7 +78,7 @@
       <div class="card">
         <div class="card-header">
           <h2>Users</h2>
-          <button class="btn btn-sm btn-primary" onclick="showCreateUser()">Create User</button>
+          <button class="btn btn-sm btn-primary" data-action="show-create-user">Create User</button>
         </div>
         <table><thead><tr><th>User ID</th><th>Name</th><th>Email</th><th>Enabled</th><th>Jobs</th><th>Actions</th></tr></thead>
         <tbody id="usersBody"></tbody></table>
@@ -89,7 +89,7 @@
       <div class="card">
         <div class="card-header">
           <h2>API Keys</h2>
-          <button class="btn btn-sm btn-primary" onclick="showCreateKey()">Create Key</button>
+          <button class="btn btn-sm btn-primary" data-action="show-create-key">Create Key</button>
         </div>
         <table><thead><tr><th>Label</th><th>Role</th><th>User</th><th>Created</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody id="keysBody"></tbody></table>
@@ -100,7 +100,7 @@
       <div class="card">
         <div class="card-header">
           <h2>Quotas</h2>
-          <button class="btn btn-sm btn-primary" onclick="showCreateQuota()">Create Quota</button>
+          <button class="btn btn-sm btn-primary" data-action="show-create-quota">Create Quota</button>
         </div>
         <table><thead><tr><th>User</th><th>App</th><th>Max Jobs</th><th>Max RAM</th><th>Max Cores</th><th>Max Concurrent</th><th>Actions</th></tr></thead>
         <tbody id="quotasBody"></tbody></table>
@@ -111,7 +111,7 @@
       <div class="card">
         <div class="card-header">
           <h2>Applications</h2>
-          <button class="btn btn-sm btn-primary" onclick="showCreateApp()">Create App</button>
+          <button class="btn btn-sm btn-primary" data-action="show-create-app">Create App</button>
         </div>
         <table><thead><tr><th>ID</th><th>Name</th><th>Command</th><th>Resources</th><th>Fields</th><th>Actions</th></tr></thead>
         <tbody id="appsBody"></tbody></table>
@@ -122,7 +122,7 @@
       <div class="card" style="margin-bottom:16px">
         <div class="card-header">
           <h2>Saved Workflows</h2>
-          <button class="btn btn-sm btn-primary" onclick="showCreateWorkflow()">New Workflow</button>
+          <button class="btn btn-sm btn-primary" data-action="show-create-workflow">New Workflow</button>
         </div>
         <table><thead><tr><th></th><th>Name</th><th>Steps</th><th>Owner</th><th>Shared</th><th>Updated</th><th>Actions</th></tr></thead>
         <tbody id="savedWorkflowsBody"></tbody></table>
@@ -209,14 +209,14 @@
       <div class="card" style="margin-bottom:16px">
         <div class="card-header">
           <h2>Machine Status</h2>
-          <button class="btn btn-sm btn-primary" onclick="loadMachineStatus()">Refresh</button>
+          <button class="btn btn-sm btn-primary" data-action="load-machines">Refresh</button>
         </div>
         <div id="machines-status-grid" class="machines-grid"></div>
       </div>
       <!-- Cloud provisioning -->
       <div class="card">
         <div class="card-header"><h2>Cloud Provisioning</h2></div>
-        <form id="cloud-provision-form" onsubmit="return false">
+        <form id="cloud-provision-form">
           <div class="form-grid">
             <div><label>Provider</label>
               <select name="provider" class="input-sm"><option value="aws">AWS</option><option value="gcp">GCP</option><option value="azure">Azure</option></select></div>
@@ -230,7 +230,7 @@
             <div><label>Min RAM (MB)</label><input name="ram_mb_min" type="number" class="input-sm" value="0"></div>
             <div><label>Min Disk (MB)</label><input name="disk_mb_min" type="number" class="input-sm" value="0"></div>
           </div>
-          <button class="btn btn-primary" id="cloud-provision-btn" style="margin-top:12px">Provision</button>
+          <button class="btn btn-primary" id="cloud-provision-btn" type="button" style="margin-top:12px">Provision</button>
         </form>
       </div>
     </div>

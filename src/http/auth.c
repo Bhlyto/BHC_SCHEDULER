@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -118,10 +119,18 @@ static int extract_key_hash(struct mg_http_message *hm, char *out_hash)
         return 0;
     }
 
-    char raw_key[256] = {0};
-    size_t klen = hdr->len < sizeof(raw_key)-1 ? hdr->len : sizeof(raw_key)-1;
-    memcpy(raw_key, hdr->buf, klen);
-    raw_key[klen] = '\0';
+    if (hdr->len != 64) {
+        log_warn("auth", "Malformed X-API-Key header");
+        return 0;
+    }
+    char raw_key[65] = {0};
+    memcpy(raw_key, hdr->buf, hdr->len);
+    for (size_t i = 0; i < hdr->len; i++) {
+        if (!isxdigit((unsigned char)raw_key[i])) {
+            log_warn("auth", "Malformed X-API-Key header");
+            return 0;
+        }
+    }
 
     sha256_hex(raw_key, out_hash);
     return 1;
@@ -164,38 +173,124 @@ void auth_hash_key(const char *raw_key, char *out_hex_65)
 
 /* ── Salted password hashing ─────────────────────────────────────── */
 
-void auth_hash_password(const char *password, char *out_buf)
+#define PBKDF2_ITERATIONS 120000
+#define PBKDF2_PREFIX "pbkdf2-sha256$"
+
+static int secure_random(unsigned char *out, size_t length)
 {
-    unsigned char salt_bytes[16];
 #ifdef _WIN32
-    {
-        HCRYPTPROV hprov;
-        CryptAcquireContextA(&hprov, NULL, NULL, PROV_RSA_FULL,
-                             CRYPT_VERIFYCONTEXT);
-        CryptGenRandom(hprov, sizeof(salt_bytes), salt_bytes);
-        CryptReleaseContext(hprov, 0);
-    }
+    HCRYPTPROV provider = 0;
+    if (!CryptAcquireContextA(&provider, NULL, NULL, PROV_RSA_FULL,
+                              CRYPT_VERIFYCONTEXT)) return -1;
+    BOOL ok = CryptGenRandom(provider, (DWORD)length, out);
+    CryptReleaseContext(provider, 0);
+    return ok ? 0 : -1;
 #else
-    {
-        FILE *urnd = fopen("/dev/urandom", "rb");
-        if (urnd) {
-            fread(salt_bytes, 1, sizeof(salt_bytes), urnd);
-            fclose(urnd);
-        }
-    }
+    FILE *random_file = fopen("/dev/urandom", "rb");
+    if (!random_file) return -1;
+    size_t read_size = fread(out, 1, length, random_file);
+    fclose(random_file);
+    return read_size == length ? 0 : -1;
 #endif
+}
 
-    char salt_hex[33] = {0};
-    for (int i = 0; i < 16; i++)
-        sprintf(salt_hex + i * 2, "%02x", salt_bytes[i]);
+static void bytes_to_hex(const unsigned char *bytes, size_t length, char *hex)
+{
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < length; i++) {
+        hex[i * 2] = digits[bytes[i] >> 4];
+        hex[i * 2 + 1] = digits[bytes[i] & 15];
+    }
+    hex[length * 2] = '\0';
+}
 
-    char salted[580];
-    snprintf(salted, sizeof(salted), "%s%s", salt_hex, password);
-    char hash_hex[65];
-    sha256_hex(salted, hash_hex);
+static int hex_value(char character)
+{
+    if (character >= '0' && character <= '9') return character - '0';
+    if (character >= 'a' && character <= 'f') return character - 'a' + 10;
+    if (character >= 'A' && character <= 'F') return character - 'A' + 10;
+    return -1;
+}
 
-    /* Output format: "<32-char-salt>$<64-char-hash>" (97 chars + NUL) */
-    snprintf(out_buf, 98, "%s$%s", salt_hex, hash_hex);
+static int hex_to_bytes(const char *hex, size_t hex_length, unsigned char *bytes)
+{
+    if (hex_length % 2 != 0) return -1;
+    for (size_t i = 0; i < hex_length / 2; i++) {
+        int high = hex_value(hex[i * 2]);
+        int low = hex_value(hex[i * 2 + 1]);
+        if (high < 0 || low < 0) return -1;
+        bytes[i] = (unsigned char)((high << 4) | low);
+    }
+    return 0;
+}
+
+static void hmac_sha256(const unsigned char *key, size_t key_length,
+                        const unsigned char *data, size_t data_length,
+                        unsigned char output[32])
+{
+    unsigned char normalized_key[64] = {0};
+    if (key_length > sizeof(normalized_key)) {
+        SHA256_CTX key_context;
+        sha256_init(&key_context);
+        sha256_update(&key_context, key, key_length);
+        sha256_final(&key_context, normalized_key);
+    } else {
+        memcpy(normalized_key, key, key_length);
+    }
+    unsigned char inner_pad[64];
+    unsigned char outer_pad[64];
+    for (size_t i = 0; i < 64; i++) {
+        inner_pad[i] = normalized_key[i] ^ 0x36;
+        outer_pad[i] = normalized_key[i] ^ 0x5c;
+    }
+    unsigned char inner_hash[32];
+    SHA256_CTX context;
+    sha256_init(&context);
+    sha256_update(&context, inner_pad, sizeof(inner_pad));
+    sha256_update(&context, data, data_length);
+    sha256_final(&context, inner_hash);
+    sha256_init(&context);
+    sha256_update(&context, outer_pad, sizeof(outer_pad));
+    sha256_update(&context, inner_hash, sizeof(inner_hash));
+    sha256_final(&context, output);
+}
+
+static void pbkdf2_sha256(const char *password,
+                          const unsigned char *salt, size_t salt_length,
+                          int iterations, unsigned char output[32])
+{
+    unsigned char initial_input[64];
+    memcpy(initial_input, salt, salt_length);
+    initial_input[salt_length] = 0;
+    initial_input[salt_length + 1] = 0;
+    initial_input[salt_length + 2] = 0;
+    initial_input[salt_length + 3] = 1;
+    unsigned char block[32];
+    size_t password_length = strlen(password);
+    hmac_sha256((const unsigned char *)password, password_length,
+                initial_input, salt_length + 4, block);
+    memcpy(output, block, sizeof(block));
+    for (int iteration = 1; iteration < iterations; iteration++) {
+        hmac_sha256((const unsigned char *)password, password_length,
+                    block, sizeof(block), block);
+        for (size_t i = 0; i < sizeof(block); i++) output[i] ^= block[i];
+    }
+}
+
+int auth_hash_password(const char *password, char *out_buf)
+{
+    if (!password || !out_buf) return -1;
+    unsigned char salt[16];
+    unsigned char derived[32];
+    if (secure_random(salt, sizeof(salt)) != 0) return -1;
+    pbkdf2_sha256(password, salt, sizeof(salt), PBKDF2_ITERATIONS, derived);
+    char salt_hex[33];
+    char derived_hex[65];
+    bytes_to_hex(salt, sizeof(salt), salt_hex);
+    bytes_to_hex(derived, sizeof(derived), derived_hex);
+    int written = snprintf(out_buf, AUTH_PASSWORD_HASH_LEN, "%s%d$%s$%s",
+                           PBKDF2_PREFIX, PBKDF2_ITERATIONS, salt_hex, derived_hex);
+    return written > 0 && written < AUTH_PASSWORD_HASH_LEN ? 0 : -1;
 }
 
 /* Constant-time comparison to prevent timing side-channels */
@@ -209,6 +304,26 @@ static int ct_compare(const char *a, const char *b, size_t len)
 
 int auth_verify_password(const char *password, const char *stored)
 {
+    if (!password || !stored) return 0;
+    if (strncmp(stored, PBKDF2_PREFIX, strlen(PBKDF2_PREFIX)) == 0) {
+        const char *iteration_text = stored + strlen(PBKDF2_PREFIX);
+        char *iteration_end = NULL;
+        long iterations = strtol(iteration_text, &iteration_end, 10);
+        if (!iteration_end || *iteration_end != '$' || iterations < 10000 || iterations > 10000000)
+            return 0;
+        const char *salt_hex = iteration_end + 1;
+        const char *salt_end = strchr(salt_hex, '$');
+        if (!salt_end || salt_end - salt_hex != 32 || strlen(salt_end + 1) != 64)
+            return 0;
+        unsigned char salt[16];
+        unsigned char expected[32];
+        unsigned char actual[32];
+        if (hex_to_bytes(salt_hex, 32, salt) != 0 ||
+            hex_to_bytes(salt_end + 1, 64, expected) != 0) return 0;
+        pbkdf2_sha256(password, salt, sizeof(salt), (int)iterations, actual);
+        return ct_compare((const char *)actual, (const char *)expected, sizeof(actual));
+    }
+
     const char *dollar = strchr(stored, '$');
     if (!dollar) {
         /* Legacy unsalted hash — plain SHA-256 comparison */
@@ -231,4 +346,11 @@ int auth_verify_password(const char *password, const char *stored)
     sha256_hex(salted, hash);
     if (strlen(hash) != strlen(expected)) return 0;
     return ct_compare(hash, expected, strlen(hash));
+}
+
+int auth_password_needs_rehash(const char *stored_hash)
+{
+    if (!stored_hash) return 1;
+    if (strncmp(stored_hash, PBKDF2_PREFIX, strlen(PBKDF2_PREFIX)) != 0) return 1;
+    return strtol(stored_hash + strlen(PBKDF2_PREFIX), NULL, 10) != PBKDF2_ITERATIONS;
 }

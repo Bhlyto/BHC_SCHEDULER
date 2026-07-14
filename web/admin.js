@@ -9,8 +9,8 @@ async function loadUsers() {
       '<tr><td>'+esc(u.user_id)+'</td><td>'+esc(u.display_name)+'</td><td>'+esc(u.email)+'</td>'
       +'<td>'+(u.enabled?'<span style="color:var(--green)">Yes</span>':'<span style="color:var(--red)">No</span>')+'</td>'
       +'<td>'+(u.total_jobs||0)+'</td>'
-      +'<td><button class="btn btn-sm btn-outline" onclick="showEditUser(\''+esc(u.user_id)+'\')">Edit</button> '
-      +'<button class="btn btn-sm btn-danger" onclick="deleteUser(\''+esc(u.user_id)+'\')">Delete</button></td></tr>'
+      +'<td><button class="btn btn-sm btn-outline" data-action="user-edit" data-user-id="'+esc(u.user_id)+'">Edit</button> '
+      +'<button class="btn btn-sm btn-danger" data-action="user-delete" data-user-id="'+esc(u.user_id)+'">Delete</button></td></tr>'
     ).join('') || '<tr><td colspan="6" style="color:var(--text2)">No users</td></tr>';
   } catch(e) { toast('Failed to load users', true); }
 }
@@ -22,8 +22,8 @@ function showCreateUser() {
     <label>Email</label><input id="cuEmail" placeholder="alice@example.com">
     <label>Password</label><input id="cuPass" type="password" placeholder="initial password">
     <div class="modal-actions">
-      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="createUser()">Create</button>
+      <button class="btn btn-outline" data-action="close-modal">Cancel</button>
+      <button class="btn btn-primary" data-action="user-create">Create</button>
     </div>`);
 }
 
@@ -53,8 +53,8 @@ async function showEditUser(uid) {
       <label>Enabled</label><select id="euEnabled"><option value="1" ${u.enabled?'selected':''}>Yes</option><option value="0" ${!u.enabled?'selected':''}>No</option></select>
       <label>New Password (leave empty to keep)</label><input id="euPass" type="password" placeholder="">
       <div class="modal-actions">
-        <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="updateUser('${esc(u.user_id)}')">Save</button>
+        <button class="btn btn-outline" data-action="close-modal">Cancel</button>
+        <button class="btn btn-primary" data-action="user-update" data-user-id="${esc(u.user_id)}">Save</button>
       </div>`);
   } catch(e) { toast('Error', true); }
 }
@@ -87,7 +87,7 @@ async function loadKeys() {
       '<tr><td>'+esc(k.label)+'</td><td>'+esc(k.role)+'</td><td>'+esc(k.user_id)+'</td>'
       +'<td>'+fmtDate(k.created_at)+'</td><td>'+(k.expires_at?fmtDate(k.expires_at):'Never')+'</td>'
       +'<td>'+(k.revoked?'<span style="color:var(--red)">Revoked</span>':'<span style="color:var(--green)">Active</span>')+'</td>'
-      +'<td>'+(k.revoked?'':'<button class="btn btn-sm btn-danger" onclick="revokeKey(\''+esc(k.key_hash)+'\')">Revoke</button>')+'</td></tr>'
+      +'<td>'+(k.revoked?'':'<button class="btn btn-sm btn-danger" data-action="key-revoke" data-key-hash="'+esc(k.key_hash)+'">Revoke</button>')+'</td></tr>'
     ).join('') || '<tr><td colspan="7" style="color:var(--text2)">No keys</td></tr>';
   } catch(e) { toast('Failed to load keys', true); }
 }
@@ -98,8 +98,8 @@ function showCreateKey() {
     <label>Role</label><select id="ckRole"><option value="user">user</option><option value="admin">admin</option></select>
     <label>User ID (bind to user)</label><input id="ckUser" placeholder="alice">
     <div class="modal-actions">
-      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="createKey()">Create</button>
+      <button class="btn btn-outline" data-action="close-modal">Cancel</button>
+      <button class="btn btn-primary" data-action="key-create">Create</button>
     </div>`);
 }
 
@@ -109,13 +109,15 @@ async function createKey() {
     role: document.getElementById('ckRole').value,
     user_id: document.getElementById('ckUser').value.trim()
   };
+  if (body.role === 'user' && !body.user_id)
+    return toast('User-role keys require a user ID', true);
   try {
     const data = await api('POST', '/admin/keys', body);
     closeModal();
     openModal(`<h2>Key Created</h2>
       <p style="margin-bottom:12px;color:var(--text2)">Copy this key now — it won't be shown again.</p>
-      <input value="${esc(data.api_key)}" onclick="this.select()" readonly style="font-family:monospace;font-size:13px">
-      <div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">Done</button></div>`);
+      <input value="${esc(data.api_key)}" data-action="select-self" readonly style="font-family:monospace;font-size:13px">
+      <div class="modal-actions"><button class="btn btn-primary" data-action="close-modal">Done</button></div>`);
     loadKeys();
   } catch(e) { toast(e.data?.error || 'Create failed', true); }
 }
@@ -135,7 +137,7 @@ async function loadQuotas() {
       '<tr><td>'+esc(q.user_id||'*')+'</td><td>'+esc(q.app_id||'*')+'</td>'
       +'<td>'+(q.max_jobs||'&#8734;')+'</td><td>'+(q.max_ram_mb?q.max_ram_mb+' MB':'&#8734;')+'</td>'
       +'<td>'+(q.max_cores||'&#8734;')+'</td><td>'+(q.max_concurrent||'&#8734;')+'</td>'
-      +'<td><button class="btn btn-sm btn-danger" onclick="deleteQuota(\''+esc(q.user_id)+'\',\''+esc(q.app_id)+'\')">Delete</button></td></tr>'
+      +'<td><button class="btn btn-sm btn-danger" data-action="quota-delete" data-user-id="'+esc(q.user_id)+'" data-app-id="'+esc(q.app_id)+'">Delete</button></td></tr>'
     ).join('') || '<tr><td colspan="7" style="color:var(--text2)">No quotas</td></tr>';
   } catch(e) { toast('Failed to load quotas', true); }
 }
@@ -149,8 +151,8 @@ function showCreateQuota() {
     <label>Max Cores (0 = unlimited)</label><input id="cqCores" type="number" value="0" min="0">
     <label>Max Concurrent (0 = unlimited)</label><input id="cqConc" type="number" value="0" min="0">
     <div class="modal-actions">
-      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="createQuota()">Save</button>
+      <button class="btn btn-outline" data-action="close-modal">Cancel</button>
+      <button class="btn btn-primary" data-action="quota-create">Save</button>
     </div>`);
 }
 
@@ -189,8 +191,8 @@ async function loadApps() {
       +'<td>'+esc(a.command_template)+'</td>'
       +'<td>'+(a.req_cores||0)+' / '+(a.req_ram_mb||0)+' MB / '+(a.req_disk_mb||0)+' MB / '+(a.req_gpu||0)+' GPU</td>'
       +'<td>'+(a.fields?a.fields.length:0)+' fields</td>'
-      +'<td><button class="btn btn-sm btn-outline" onclick="showEditApp(\''+esc(a.app_id)+'\')">Edit</button> '
-      +'<button class="btn btn-sm btn-danger" onclick="deleteApp(\''+esc(a.app_id)+'\')">Delete</button></td></tr>'
+      +'<td><button class="btn btn-sm btn-outline" data-action="app-edit" data-app-id="'+esc(a.app_id)+'">Edit</button> '
+      +'<button class="btn btn-sm btn-danger" data-action="app-delete" data-app-id="'+esc(a.app_id)+'">Delete</button></td></tr>'
     ).join('') || '<tr><td colspan="6" style="color:var(--text2)">No apps configured</td></tr>';
   } catch(e) { toast('Failed to load apps', true); }
 }
@@ -220,8 +222,8 @@ function showCreateApp() {
       Field types: checkbox, select, text, number. Select fields need "options" array.
     </div>
     <div class="modal-actions">
-      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="createApp()">Create</button>
+      <button class="btn btn-outline" data-action="close-modal">Cancel</button>
+      <button class="btn btn-primary" data-action="app-create">Create</button>
     </div>`);
 }
 
@@ -263,8 +265,8 @@ async function showEditApp(appId) {
       <label>Fields (JSON array)</label>
       <textarea id="eaFields" rows="8">${esc(fieldsJson)}</textarea>
       <div class="modal-actions">
-        <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="updateApp('${esc(app.app_id)}')">Save</button>
+        <button class="btn btn-outline" data-action="close-modal">Cancel</button>
+        <button class="btn btn-primary" data-action="app-update" data-app-id="${esc(app.app_id)}">Save</button>
       </div>`);
   } catch(e) { toast('Error loading app', true); }
 }

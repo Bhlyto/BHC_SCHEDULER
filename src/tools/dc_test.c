@@ -8,18 +8,27 @@
 #include <string.h>
 #include <stdlib.h>
 
+void platform_service_start(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+}
+
+void platform_request_stop(void)
+{
+}
+
+int platform_stop_requested(void)
+{
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
-    /* Provide minimal platform stubs expected by linked core code */
-    (void)argc; (void)argv;
-
-    void platform_service_start(int a, char **b) { (void)a; (void)b; }
-    void platform_request_stop(void) { }
-    int platform_stop_requested(void) { return 1; }
-
     (void)argc; (void)argv;
     config_defaults();
-    config_load("config/orchestrator.conf");
+    strncpy(g_config.db_path, ":memory:", sizeof(g_config.db_path) - 1);
+    strncpy(g_config.work_dir, "test-jobs", sizeof(g_config.work_dir) - 1);
     if (db_open(g_config.db_path) != 0) {
         fprintf(stderr, "db_open failed\n");
         return 1;
@@ -50,7 +59,8 @@ int main(int argc, char **argv)
     ctx.available_mem_mb = 8192;
     ctx.local_error_estimate = 0.05;
     dc_result_t out;
-    if (decision_core_decide(&ctx, &out) == 0) {
+    int decision_result = decision_core_decide(&ctx, &out);
+    if (decision_result == 0) {
         printf("action=%d target_cores=%u\nallocation_json=%s\n",
                out.action, out.target_cores, out.allocation_json);
     } else {
@@ -58,6 +68,13 @@ int main(int argc, char **argv)
     }
 
     decision_core_shutdown();
+    store_cleanup_job(job->id);
+    job_free(job);
     db_close();
+    if (decision_result != 0 || out.target_cores == 0 ||
+        out.target_cores > ctx.available_cpus) {
+        fprintf(stderr, "invalid decision-core resource target\n");
+        return 1;
+    }
     return 0;
 }

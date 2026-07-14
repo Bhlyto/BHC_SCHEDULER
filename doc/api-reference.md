@@ -27,6 +27,8 @@ The returned key expires in 24 hours. Any previous key for the user is revoked.
 
 Returns `401` for invalid credentials, `403` if the account is disabled.
 
+Passwords contain 12 to 128 characters and are stored with PBKDF2-HMAC-SHA256. Legacy hashes are upgraded after a successful login.
+
 ---
 
 ### Available auth methods
@@ -36,6 +38,18 @@ GET /auth/methods
 
 ```json
 { "methods": ["password", "api_key"] }
+```
+
+---
+
+### Current identity
+```http
+GET /auth/me
+X-API-Key: <your-key>
+```
+
+```json
+{ "user_id": "alice", "role": "user" }
 ```
 
 ---
@@ -59,11 +73,12 @@ Returns `{"ok": true}` or `401` if old password is wrong.
 ```http
 POST /jobs
 Content-Type: application/json
+Idempotency-Key: client-request-123
 ```
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `command` | string | ✅ | Command to execute |
+| `command` | string | Free mode only | Command to execute |
 | `priority` | int | — | Priority (lower = higher priority). Default: `50` |
 | `req_cores` | int | — | CPU cores required. Default: `1` |
 | `req_gpu` | int | — | GPUs required. Default: `0` |
@@ -72,6 +87,10 @@ Content-Type: application/json
 | `timeout_seconds` | int | — | Per-job timeout (0 = use global default) |
 | `app_id` | string | — | Associate job with an application definition |
 | `input_files` | string[] | — | Expected input filenames; job starts as `HELD` until all are uploaded |
+
+In the default `app_only` mode, `app_id` and a typed `parameters` object replace `command`. Raw commands, undeclared parameters, and incorrect types are rejected. Resource fields are loaded from the server-side application definition, so client-provided `req_*` values cannot raise a job's allocation. The `command` field is available only when an administrator explicitly enables `command_mode = free`.
+
+`Idempotency-Key` is optional, accepts 1–128 characters from `[A-Za-z0-9_.:-]`, and requires an API key bound to a user. Repeating a submission with the same user and key returns the original job with `200` instead of creating a duplicate.
 
 Response `201`:
 ```json
@@ -111,9 +130,9 @@ Manually releases a `HELD` job to the queue, even if not all files have been upl
 
 ### List all jobs
 ```http
-GET /jobs
+GET /jobs?limit=100&offset=0&status=RUNNING&app_id=app1
 ```
-Returns a JSON array of all job objects.
+Returns a JSON array of job objects. `limit` accepts `1–500`; `offset` must be non-negative. `status` accepts `QUEUED`/`IN_QUEUE`, `HELD`, `STARTING`, `RUNNING`, `FINISHED`, `FAILED`, or `CANCELLED`. Administrators may also filter with `user_id`; regular users always see only their own jobs.
 
 ---
 
@@ -266,6 +285,27 @@ GET /stats
 }
 ```
 
+### Prometheus metrics (admin)
+```http
+GET /metrics
+```
+
+Returns Prometheus text exposition for job states, machine states, drain mode, and total/reserved CPU and RAM.
+
+### Scheduler maintenance / drain mode (admin)
+```http
+GET /admin/maintenance
+```
+
+```http
+POST /admin/maintenance
+Content-Type: application/json
+
+{ "accepting_jobs": false }
+```
+
+Drain mode rejects new single-job and workflow submissions with `503` while queued and active jobs continue. Re-enable submissions by posting `true`.
+
 ---
 
 ## Live Provisioning
@@ -291,6 +331,8 @@ Content-Type: application/json
 ```http
 DELETE /provision/:id
 ```
+
+Returns `409` while the machine still has reserved resources.
 
 ---
 
@@ -481,7 +523,7 @@ Content-Type: application/json
 | `provider` | string | ✅ | `"aws"`, `"gcp"`, or `"azure"` |
 | `instance_type` | string | — | Instance/VM size (e.g. `t3.xlarge`, `e2-standard-4`, `Standard_B2s`) |
 | `region` | string | — | Cloud region / zone |
-| `image_id` | string | — | AMI ID (AWS), image family (GCP), or image URN (Azure) |
+| `image_id` | string | AWS only | AMI ID (AWS), image family (GCP), or image URN (Azure) |
 | `cores` | int | — | vCPUs to register in the pool |
 | `gpu_count` | int | — | GPUs to register |
 | `ram_mb` | int | — | RAM in MB to register |
@@ -520,7 +562,7 @@ Response `200`:
 { "ok": true }
 ```
 
-The instance is terminated via the provider CLI and removed from the machine pool.
+The instance is terminated via the provider CLI and removed from the machine pool. Deprovisioning returns `409` when the registered machine still has reserved resources.
 
 ### Auto-scaling
 
@@ -677,7 +719,9 @@ Content-Type: application/json
 ```http
 GET /admin/keys
 ```
-Returns keys with masked hashes (first 8 + last 4 characters).
+Returns each key's administrative hash, masked display hash, label, role, bound user,
+creation/expiration timestamps, and revocation state. The administrative hash is not
+an authentication credential; it is used to identify a key for revocation.
 
 ---
 
@@ -693,7 +737,7 @@ Content-Type: application/json
   "expires_at": 1712505600
 }
 ```
-All fields optional. Defaults: label=`"default"`, role=`"user"`, user_id=`""`, expires_at=`0` (never).
+`label` and `expires_at` are optional. `role` defaults to `"user"`; user-role keys must reference an enabled `user_id`. Administrators may create an unbound admin key explicitly with `role = "admin"`. `expires_at = 0` means no expiration; non-zero timestamps must be in the future.
 
 Response `201`:
 ```json
@@ -713,8 +757,10 @@ Response `201`:
 DELETE /admin/keys
 Content-Type: application/json
 
-{ "api_key": "<raw-64-hex-key>" }
+{ "key_hash": "<64-hex-hash returned by GET /admin/keys>" }
 ```
+
+The raw `api_key` is also accepted when it is still available.
 
 ---
 

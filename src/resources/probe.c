@@ -137,9 +137,9 @@ int machine_is_reachable(const char *host, ProbeMethod method,
 
 void probe_refresh_all(ProbeMethod method, int port, int timeout_ms, int retries)
 {
-    int count = 0;
-    Machine *machines = registry_all(&count);
-    if (!machines || count == 0) return;
+    Machine *machines = NULL;
+    int count = registry_snapshot(&machines);
+    if (count <= 0) return;
 
     for (int i = 0; i < count; i++) {
         Machine *m = &machines[i];
@@ -150,26 +150,22 @@ void probe_refresh_all(ProbeMethod method, int port, int timeout_ms, int retries
         const char *host = m->hostname[0] ? m->hostname : m->ip;
         if (strcmp(host, "localhost") == 0 || strcmp(host, "127.0.0.1") == 0 ||
             strcmp(m->ip, "127.0.0.1") == 0) {
-            m->probe_status = MACHINE_ONLINE;
-            m->last_probe_time = time(NULL);
+            registry_update_probe(m->id, MACHINE_ONLINE, time(NULL), 1);
             continue;
         }
 
-        m->probe_status = MACHINE_PROBING;
+        registry_update_probe(m->id, MACHINE_PROBING, time(NULL), -1);
         int ok = 0;
         for (int r = 0; r <= retries && !ok; r++) {
             ok = machine_is_reachable(m->hostname[0] ? m->hostname : m->ip,
                                       method, port, timeout_ms);
         }
-        m->probe_status    = ok ? MACHINE_ONLINE : MACHINE_OFFLINE;
-        m->last_probe_time = time(NULL);
-        if (!ok)
-            m->probe_fail_count++;
-        else
-            m->probe_fail_count = 0;
+        registry_update_probe(m->id, ok ? MACHINE_ONLINE : MACHINE_OFFLINE,
+                              time(NULL), ok);
 
         log_debug("probe", "%s -> %s", m->id, ok ? "ONLINE" : "OFFLINE");
     }
+    free(machines);
 }
 
 /* ── Background probe thread ──────────────────────────────────── */
@@ -184,16 +180,29 @@ typedef struct {
 
 static ProbeConfig s_probe_cfg;
 
+static int probe_wait_interruptible(int milliseconds)
+{
+    int remaining = milliseconds;
+    while (s_probe_running && remaining > 0) {
+        int slice = remaining > 100 ? 100 : remaining;
+#ifdef _WIN32
+        Sleep((DWORD)slice);
+#else
+        usleep((useconds_t)slice * 1000);
+#endif
+        remaining -= slice;
+    }
+    return s_probe_running;
+}
+
 #ifdef _WIN32
 static DWORD WINAPI probe_thread_fn(LPVOID arg)
 {
     (void)arg;
-    /* Sleep first so machines start as ONLINE; probe fires after first interval */
-    Sleep(s_probe_cfg.interval_ms);
     while (s_probe_running) {
         probe_refresh_all(s_probe_cfg.method, s_probe_cfg.port,
                           s_probe_cfg.timeout_ms, s_probe_cfg.retries);
-        Sleep(s_probe_cfg.interval_ms);
+        if (!probe_wait_interruptible(s_probe_cfg.interval_ms)) break;
     }
     return 0;
 }
@@ -201,12 +210,10 @@ static DWORD WINAPI probe_thread_fn(LPVOID arg)
 static void *probe_thread_fn(void *arg)
 {
     (void)arg;
-    /* Sleep first so machines start as ONLINE; probe fires after first interval */
-    usleep((useconds_t)s_probe_cfg.interval_ms * 1000);
     while (s_probe_running) {
         probe_refresh_all(s_probe_cfg.method, s_probe_cfg.port,
                           s_probe_cfg.timeout_ms, s_probe_cfg.retries);
-        usleep((useconds_t)s_probe_cfg.interval_ms * 1000);
+        if (!probe_wait_interruptible(s_probe_cfg.interval_ms)) break;
     }
     return NULL;
 }
@@ -229,8 +236,10 @@ void probe_start_background(int interval_ms, ProbeMethod method,
 
 #ifdef _WIN32
     s_probe_thread = CreateThread(NULL, 0, probe_thread_fn, NULL, 0, NULL);
+    if (!s_probe_thread) s_probe_running = 0;
 #else
-    pthread_create(&s_probe_thread, NULL, probe_thread_fn, NULL);
+    if (pthread_create(&s_probe_thread, NULL, probe_thread_fn, NULL) != 0)
+        s_probe_running = 0;
 #endif
 }
 
@@ -241,7 +250,7 @@ void probe_stop_background(void)
 
 #ifdef _WIN32
     if (s_probe_thread) {
-        WaitForSingleObject(s_probe_thread, 5000);
+        WaitForSingleObject(s_probe_thread, INFINITE);
         CloseHandle(s_probe_thread);
         s_probe_thread = NULL;
     }
