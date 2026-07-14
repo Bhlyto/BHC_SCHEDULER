@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(orchestrator C)
 
+include(CTest)
+
+option(ORCH_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -101,6 +105,22 @@ add_executable(presim_e2e_test
 target_include_directories(presim_e2e_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(presim_e2e_test ${PLATFORM_LIBS})
 
+if(BUILD_TESTING)
+    add_executable(unit_tests
+        tests/unit_tests.c
+        ${CORE_SOURCES}
+        ${VENDOR_SOURCES}
+    )
+    target_include_directories(unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(unit_tests ${PLATFORM_LIBS})
+    target_compile_definitions(unit_tests PRIVATE ORCH_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    add_test(NAME unit_tests COMMAND unit_tests)
+    set_tests_properties(unit_tests PROPERTIES TIMEOUT 30)
+    add_test(NAME decision_core COMMAND dc_test)
+    add_test(NAME presim_e2e COMMAND presim_e2e_test)
+    set_tests_properties(decision_core presim_e2e PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+endif()
+
 # Copy config/ next to the executable after each build
 add_custom_command(TARGET orchestrator POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -135,6 +155,39 @@ if(WIN32)
 else()
     target_compile_definitions(orchestrator PRIVATE MG_ARCH=1)  # MG_ARCH_UNIX
 endif()
+
+set(ORCH_FULL_TARGETS orchestrator dc_test presim_e2e_test)
+if(BUILD_TESTING)
+    list(APPEND ORCH_FULL_TARGETS unit_tests)
+endif()
+
+foreach(target_name IN LISTS ORCH_FULL_TARGETS)
+    target_compile_definitions(${target_name} PRIVATE MG_TLS=0 SQLITE_THREADSAFE=1)
+    if(WIN32)
+        target_compile_definitions(${target_name} PRIVATE MG_ARCH=2 _WIN32_WINNT=0x0601)
+    else()
+        target_compile_definitions(${target_name} PRIVATE MG_ARCH=1)
+    endif()
+endforeach()
+
+if(ORCH_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    foreach(target_name IN LISTS ORCH_FULL_TARGETS)
+        target_compile_options(${target_name} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${target_name} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+    target_compile_options(presim_runner PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(presim_runner PRIVATE -fsanitize=address,undefined)
+endif()
+
+install(TARGETS orchestrator presim_runner RUNTIME DESTINATION bin)
+install(DIRECTORY config web DESTINATION bin)
+install(FILES orchestrator.service DESTINATION share/bhc-scheduler OPTIONAL)
+
+set(CPACK_PACKAGE_NAME "bhc-scheduler")
+set(CPACK_PACKAGE_VERSION "1.0.0")
+set(CPACK_PACKAGE_CONTACT "BHC Scheduler maintainers")
+set(CPACK_GENERATOR "ZIP;TGZ")
+include(CPack)
 
 # ──────────────────────────────────────────────
 # Optional: stricter warnings in debug mode

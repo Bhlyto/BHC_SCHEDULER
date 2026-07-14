@@ -56,17 +56,28 @@ typedef struct {
 /* Load machines from provisioning.json. Returns number loaded, -1 on error. */
 int  registry_load(const char *json_path);
 
-/* Find a machine by id. Returns pointer into internal array (do not free). */
-Machine *registry_get(const char *machine_id);
+/* Copy a machine by id into out. Returns 0 if found, -1 otherwise. */
+int registry_get_copy(const char *machine_id, Machine *out);
 
-/* Returns array of all known machines and sets *count. */
-Machine *registry_all(int *count);
+/* Allocate a consistent machine snapshot. Caller frees *out_machines.
+   Returns the machine count, or -1 on allocation failure. */
+int registry_snapshot(Machine **out_machines);
 
 /* Add or update a machine entry at runtime. */
 int  registry_upsert(const Machine *m);
 
-/* Remove a machine by id. Returns 0 ok, -1 not found. */
+/* Remove a machine by id. Returns 0 ok, -1 not found, -2 while reserved. */
 int  registry_remove(const char *machine_id);
+
+/* Atomically reserve or release machine resources. */
+int registry_reserve(const char *machine_id, int cores, int gpu,
+                     int ram_mb, int disk_mb);
+int registry_release(const char *machine_id, int cores, int gpu,
+                     int ram_mb, int disk_mb);
+
+/* Atomically update availability information from a probe result. */
+int registry_update_probe(const char *machine_id, MachineStatus status,
+                          time_t probe_time, int reachable);
 
 /* ── Allocator ───────────────────────────────── */
 
@@ -101,6 +112,7 @@ int  alloc_reserve_multi(const char *job_id,
 
 /* Release resources previously reserved for job_id (single or multi). */
 int  alloc_release(const char *job_id);
+void alloc_shutdown(void);
 
 /* Check (without reserving) whether any single machine can satisfy requirements. */
 int  alloc_can_fit(int req_cores, int req_gpu,

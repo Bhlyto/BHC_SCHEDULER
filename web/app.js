@@ -6,6 +6,9 @@ let USER_ROLE = '';
 let APPS_CACHE = [];
 let _currentTab = 'dashboard';
 let _refreshTimer = null;
+let _eventAbort = null;
+let _eventReconnectTimer = null;
+let _liveRefreshTimer = null;
 
 /* ── API helpers ─────────────────────────────── */
 async function api(method, path, body) {
@@ -28,6 +31,58 @@ async function apiRaw(method, path, rawBody, contentType) {
   const r = await fetch(BASE + path, opts);
   if (!r.ok) { const t = await r.text(); let d; try { d = JSON.parse(t); } catch { d = t; } throw { status: r.status, data: d }; }
   return r;
+}
+
+function stopEventStream() {
+  const controller = _eventAbort;
+  _eventAbort = null;
+  if (controller) controller.abort();
+  if (_eventReconnectTimer) clearTimeout(_eventReconnectTimer);
+  if (_liveRefreshTimer) clearTimeout(_liveRefreshTimer);
+  _eventReconnectTimer = null;
+  _liveRefreshTimer = null;
+}
+
+function scheduleLiveRefresh() {
+  if (_liveRefreshTimer) return;
+  _liveRefreshTimer = setTimeout(() => {
+    _liveRefreshTimer = null;
+    if (API_KEY && (_currentTab === 'dashboard' || _currentTab === 'jobs')) refreshCurrentTab();
+  }, 250);
+}
+
+async function startEventStream() {
+  stopEventStream();
+  if (!API_KEY) return;
+  const controller = new AbortController();
+  _eventAbort = controller;
+  try {
+    const response = await fetch(BASE + '/jobs/events', {
+      headers: { 'X-API-Key': API_KEY },
+      signal: controller.signal
+    });
+    if (!response.ok || !response.body) throw new Error('SSE unavailable');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      lines.forEach(line => {
+        if (line.startsWith('data:')) scheduleLiveRefresh();
+      });
+    }
+  } catch (error) {
+    if (error.name !== 'AbortError') console.warn('Event stream disconnected');
+  } finally {
+    if (_eventAbort === controller && API_KEY) {
+      _eventAbort = null;
+      _eventReconnectTimer = setTimeout(startEventStream, 2000);
+    }
+  }
 }
 
 /* ── Toast ────────────────────────────────────── */
@@ -54,11 +109,13 @@ function fmtDate(ts) {
 function statusBadge(s) {
   const cls = { RUNNING:'running', IN_QUEUE:'queued', QUEUED:'queued', FINISHED:'finished', FAILED:'failed',
                 HELD:'held', CANCELLED:'cancelled', STARTING:'starting' }[s] || 'queued';
-  return '<span class="badge badge-' + cls + '">' + s + '</span>';
+  return '<span class="badge badge-' + cls + '">' + esc(s) + '</span>';
 }
 function shortId(id) { return id ? id.substring(0, 8) : '—'; }
 function esc(s) {
-  const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML;
+  return String(s ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[ch]);
 }
 function fmtSize(bytes) {
   if (!bytes || bytes <= 0) return '0 B';
@@ -67,6 +124,89 @@ function fmtSize(bytes) {
   while (bytes >= 1024 && i < u.length - 1) { bytes /= 1024; i++; }
   return bytes.toFixed(i ? 1 : 0) + ' ' + u[i];
 }
+
+function handleClickAction(action, element, event) {
+  switch (action) {
+    case 'login': doLogin(); break;
+    case 'api-key-login': doApiKeyLogin(); break;
+    case 'show-change-password': showChangePassword(); break;
+    case 'logout': doLogout(); break;
+    case 'switch-tab': switchTab(element.dataset.tab); break;
+    case 'show-submit-job': showSubmitJob(); break;
+    case 'load-jobs': loadJobs(); break;
+    case 'purge-jobs': purgeJobs(); break;
+    case 'show-create-user': showCreateUser(); break;
+    case 'show-create-key': showCreateKey(); break;
+    case 'show-create-quota': showCreateQuota(); break;
+    case 'show-create-app': showCreateApp(); break;
+    case 'show-create-workflow': showCreateWorkflow(); break;
+    case 'load-machines': if (window.loadMachineStatus) window.loadMachineStatus(); break;
+    case 'close-modal': closeModal(); break;
+    case 'change-password': changePassword(); break;
+    case 'submit-job': submitJob(); break;
+    case 'job-cancel': event.stopPropagation(); cancelJob(element.dataset.jobId); break;
+    case 'job-release': event.stopPropagation(); releaseJob(element.dataset.jobId); break;
+    case 'job-kill': event.stopPropagation(); killJob(element.dataset.jobId); break;
+    case 'job-detail': showJobDetail(element.dataset.jobId); break;
+    case 'workflow-toggle-group': toggleWorkflowGroup(element.dataset.collapseId); break;
+    case 'view-log': viewLog(element.dataset.jobId, element.dataset.stderr === '1'); break;
+    case 'upload-job': uploadToJob(element.dataset.jobId); break;
+    case 'download-file': downloadFile(element.dataset.jobId, element.dataset.filename); break;
+    case 'wf-toggle-favorite': wfToggleFavorite(element.dataset.workflowId); break;
+    case 'wf-run-saved': wfLoadAndRun(element.dataset.workflowId); break;
+    case 'wf-edit-saved': wfLoadForEdit(element.dataset.workflowId); break;
+    case 'wf-duplicate': wfDuplicate(element.dataset.workflowId); break;
+    case 'wf-delete-saved': wfDeleteSaved(element.dataset.workflowId); break;
+    case 'wf-remove-step': wfRemoveStep(Number(element.dataset.step)); break;
+    case 'wf-add-step': wfAddStep(); break;
+    case 'wf-save': wfSave(false); break;
+    case 'wf-submit': wfSubmit(); break;
+    case 'wf-hide': hideWorkflowEditor(); break;
+    case 'user-edit': showEditUser(element.dataset.userId); break;
+    case 'user-delete': deleteUser(element.dataset.userId); break;
+    case 'user-create': createUser(); break;
+    case 'user-update': updateUser(element.dataset.userId); break;
+    case 'key-create': createKey(); break;
+    case 'key-revoke': revokeKey(element.dataset.keyHash); break;
+    case 'quota-create': createQuota(); break;
+    case 'quota-delete': deleteQuota(element.dataset.userId, element.dataset.appId); break;
+    case 'app-create': createApp(); break;
+    case 'app-edit': showEditApp(element.dataset.appId); break;
+    case 'app-delete': deleteApp(element.dataset.appId); break;
+    case 'app-update': updateApp(element.dataset.appId); break;
+    case 'select-self': element.select(); break;
+  }
+}
+
+function handleChangeAction(action, element) {
+  const step = Number(element.dataset.step);
+  switch (action) {
+    case 'app-selection': onAppChange(); break;
+    case 'wf-field': {
+      const type = element.dataset.fieldType;
+      const value = type === 'checkbox' ? element.checked : element.value;
+      wfFieldChange(step, element.dataset.fieldName, value, type);
+      break;
+    }
+    case 'wf-toggle-dep': wfToggleDep(step, Number(element.dataset.dependency)); break;
+    case 'wf-app': wfAppChange(step, element.value); break;
+    case 'wf-priority': wfSetPriority(step, element.value); break;
+    case 'wf-timeout': wfSetTimeout(step, element.value); break;
+    case 'wf-files': wfSetFiles(step, element); break;
+    case 'wf-same-machine': _wfSteps[step].same_machine = element.checked; break;
+  }
+}
+
+document.addEventListener('click', event => {
+  const element = event.target.closest('[data-action]');
+  if (!element || element.disabled) return;
+  handleClickAction(element.dataset.action, element, event);
+});
+
+document.addEventListener('change', event => {
+  const element = event.target.closest('[data-change-action]');
+  if (element) handleChangeAction(element.dataset.changeAction, element);
+});
 
 /* ── Auth ─────────────────────────────────────── */
 async function doLogin() {
@@ -78,9 +218,6 @@ async function doLogin() {
     API_KEY = data.api_key;
     USER_ID = data.user_id;
     USER_ROLE = data.role;
-    sessionStorage.setItem('api_key', API_KEY);
-    sessionStorage.setItem('user_id', USER_ID);
-    sessionStorage.setItem('user_role', USER_ROLE);
     enterApp();
   } catch (e) {
     showLoginError(e.data?.error || 'Login failed');
@@ -92,12 +229,9 @@ async function doApiKeyLogin() {
   if (!key) return showLoginError('Enter an API key');
   API_KEY = key;
   try {
-    const data = await api('GET', '/stats');
-    USER_ID = 'api-key-user';
-    USER_ROLE = 'admin';
-    sessionStorage.setItem('api_key', API_KEY);
-    sessionStorage.setItem('user_id', USER_ID);
-    sessionStorage.setItem('user_role', USER_ROLE);
+    const data = await api('GET', '/auth/me');
+    USER_ID = data.user_id || 'api-key-user';
+    USER_ROLE = data.role || 'user';
     enterApp();
   } catch(e) {
     API_KEY = '';
@@ -107,7 +241,7 @@ async function doApiKeyLogin() {
 
 function doLogout() {
   API_KEY = ''; USER_ID = ''; USER_ROLE = '';
-  sessionStorage.clear();
+  stopEventStream();
   stopAutoRefresh();
   document.getElementById('app').style.display = 'none';
   document.getElementById('loginScreen').style.display = 'flex';
@@ -132,18 +266,8 @@ async function enterApp() {
   if (window.initReports) initReports();
   switchTab('dashboard');
   startAutoRefresh();
+  startEventStream();
 }
-
-/* Auto-login from session */
-(function() {
-  const k = sessionStorage.getItem('api_key');
-  if (k) {
-    API_KEY = k;
-    USER_ID = sessionStorage.getItem('user_id') || '';
-    USER_ROLE = sessionStorage.getItem('user_role') || 'user';
-    enterApp();
-  }
-})();
 
 /* Enter key on login */
 document.getElementById('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
@@ -189,8 +313,8 @@ function showChangePassword() {
     <label>New Password</label><input id="cpNew" type="password">
     <label>Confirm New Password</label><input id="cpConfirm" type="password">
     <div class="modal-actions">
-      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="changePassword()">Change</button>
+      <button class="btn btn-outline" data-action="close-modal">Cancel</button>
+      <button class="btn btn-primary" data-action="change-password">Change</button>
     </div>`);
 }
 

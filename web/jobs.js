@@ -3,17 +3,17 @@
 function jobActions(j) {
   let btns = '';
   if (j.status === 'IN_QUEUE' || j.status === 'RUNNING' || j.status === 'HELD' || j.status === 'STARTING')
-    btns += '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();cancelJob(\''+j.id+'\')">Cancel</button>';
+    btns += '<button class="btn btn-sm btn-danger" data-action="job-cancel" data-job-id="'+esc(j.id)+'">Cancel</button>';
   if (j.status === 'HELD')
-    btns += ' <button class="btn btn-sm btn-outline" onclick="event.stopPropagation();releaseJob(\''+j.id+'\')">Release</button>';
+    btns += ' <button class="btn btn-sm btn-outline" data-action="job-release" data-job-id="'+esc(j.id)+'">Release</button>';
   if (j.status === 'RUNNING' || j.status === 'STARTING')
-    btns += ' <button class="btn btn-sm btn-outline" style="border-color:var(--red);color:var(--red)" onclick="event.stopPropagation();killJob(\''+j.id+'\')">Kill</button>';
+    btns += ' <button class="btn btn-sm btn-outline" style="border-color:var(--red);color:var(--red)" data-action="job-kill" data-job-id="'+esc(j.id)+'">Kill</button>';
   return btns;
 }
 
 function jobRow(j) {
   const appName = appLabel(j.app_id);
-  return '<tr style="cursor:pointer" onclick="showJobDetail(\''+j.id+'\')">'
+  return '<tr style="cursor:pointer" data-action="job-detail" data-job-id="'+esc(j.id)+'">'
     +'<td title="'+esc(j.id)+'">'+shortId(j.id)+'</td>'
     +'<td>'+esc(j.command)+'</td>'
     +'<td>'+statusBadge(j.status)+'</td>'
@@ -52,7 +52,7 @@ async function loadJobs() {
 
     wfEntries.forEach(([wfId, wfJobs]) => {
       const collapseId = 'wf_' + wfId.replace(/[^a-zA-Z0-9]/g,'');
-      html += '<tr class="wf-group-header" onclick="toggleWorkflowGroup(\''+collapseId+'\')" style="cursor:pointer;background:var(--surface)">'
+      html += '<tr class="wf-group-header" data-action="workflow-toggle-group" data-collapse-id="'+esc(collapseId)+'" style="cursor:pointer;background:var(--surface)">'
         +'<td colspan="7" style="padding:10px 12px;border-left:3px solid var(--primary)">'
         +'<div style="display:flex;align-items:center;justify-content:space-between">'
         +'<div style="display:flex;align-items:center;gap:8px">'
@@ -65,7 +65,7 @@ async function loadJobs() {
         +'</div></td></tr>';
       wfJobs.forEach(j => {
         const appName = appLabel(j.app_id);
-        html += '<tr class="wf-child '+collapseId+'" style="cursor:pointer;background:var(--bg)" onclick="showJobDetail(\''+j.id+'\')">'
+        html += '<tr class="wf-child '+collapseId+'" style="cursor:pointer;background:var(--bg)" data-action="job-detail" data-job-id="'+esc(j.id)+'">'
           +'<td style="padding-left:28px" title="'+esc(j.id)+'">'+shortId(j.id)+'</td>'
           +'<td>'+esc(j.command)+'</td>'
           +'<td>'+statusBadge(j.status)+'</td>'
@@ -129,7 +129,7 @@ function showSubmitJob() {
 
   openModal(`<h2>Submit Job</h2>
     <label>Application</label>
-    <select id="sjApp" onchange="onAppChange()">${opts}</select>
+    <select id="sjApp" data-change-action="app-selection">${opts}</select>
     <div id="sjResources" class="resource-bar"></div>
     <div id="sjAppFields"></div>
     <label>Priority (0-100)</label><input id="sjPri" type="number" value="50" min="0" max="100">
@@ -137,8 +137,8 @@ function showSubmitJob() {
     <label>Input Files (optional)</label>
     <input id="sjFiles" type="file" multiple style="padding:8px">
     <div class="modal-actions">
-      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="submitJob()">Submit</button>
+      <button class="btn btn-outline" data-action="close-modal">Cancel</button>
+      <button class="btn btn-primary" data-action="submit-job">Submit</button>
     </div>`);
 
   /* Trigger initial app selection */
@@ -156,10 +156,10 @@ function onAppChange() {
   const resEl = document.getElementById('sjResources');
   if (resEl) {
     resEl.innerHTML =
-      '<div class="item"><span>Cores:</span> '+(app.req_cores||1)+'</div>'
-      +'<div class="item"><span>RAM:</span> '+(app.req_ram_mb||0)+' MB</div>'
-      +'<div class="item"><span>Disk:</span> '+(app.req_disk_mb||0)+' MB</div>'
-      +'<div class="item"><span>GPU:</span> '+(app.req_gpu||0)+'</div>';
+      '<div class="item"><span>Cores:</span> '+esc(app.req_cores||1)+'</div>'
+      +'<div class="item"><span>RAM:</span> '+esc(app.req_ram_mb||0)+' MB</div>'
+      +'<div class="item"><span>Disk:</span> '+esc(app.req_disk_mb||0)+' MB</div>'
+      +'<div class="item"><span>GPU:</span> '+esc(app.req_gpu||0)+'</div>';
   }
 
   /* Render dynamic fields */
@@ -173,16 +173,16 @@ function renderAppFields(fields) {
   fields.forEach(f => {
     const id = 'sjField_' + f.name;
     if (f.type === 'checkbox') {
-      html += '<label class="checkbox-label"><input type="checkbox" id="'+id+'" '+(f.default ? 'checked' : '')+'> '+esc(f.label || f.name)+'</label>';
+      html += '<label class="checkbox-label"><input type="checkbox" id="'+esc(id)+'" '+(f.default ? 'checked' : '')+'> '+esc(f.label || f.name)+'</label>';
     } else if (f.type === 'select') {
       const options = (f.options || []).map(o =>
         '<option value="'+esc(o)+'" '+(o === f.default ? 'selected' : '')+'>'+esc(o)+'</option>'
       ).join('');
-      html += '<label>'+esc(f.label || f.name)+'</label><select id="'+id+'">'+options+'</select>';
+      html += '<label>'+esc(f.label || f.name)+'</label><select id="'+esc(id)+'">'+options+'</select>';
     } else if (f.type === 'number') {
-      html += '<label>'+esc(f.label || f.name)+'</label><input type="number" id="'+id+'" value="'+(f.default||0)+'">';
+      html += '<label>'+esc(f.label || f.name)+'</label><input type="number" id="'+esc(id)+'" value="'+esc(f.default ?? 0)+'">';
     } else {
-      html += '<label>'+esc(f.label || f.name)+'</label><input type="text" id="'+id+'" value="'+esc(f.default||'')+'" placeholder="'+esc(f.placeholder||'')+'">';
+      html += '<label>'+esc(f.label || f.name)+'</label><input type="text" id="'+esc(id)+'" value="'+esc(f.default||'')+'" placeholder="'+esc(f.placeholder||'')+'">';
     }
   });
   container.innerHTML = html;
@@ -212,18 +212,10 @@ async function submitJob() {
 
   /* Collect field values as parameters for server-side command resolution */
   const appFields = collectAppFields(app);
-  const parameters = {};
-  Object.entries(appFields).forEach(([k, v]) => {
-    parameters[k] = String(v);
-  });
 
   const body = {
     app_id: appId,
-    parameters: parameters,
-    req_cores: app.req_cores || 1,
-    req_ram_mb: app.req_ram_mb || 0,
-    req_gpu: app.req_gpu || 0,
-    req_disk_mb: app.req_disk_mb || 0,
+    parameters: appFields,
     priority: +document.getElementById('sjPri').value,
     timeout_seconds: +document.getElementById('sjTimeout').value
   };
@@ -286,8 +278,8 @@ async function showJobDetail(id) {
     html += '<div class="card" style="margin-bottom:12px;padding:12px">'
       + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><b style="font-size:14px">Logs</b>'
       + '<div style="display:flex;gap:6px">'
-      + (files.logs.has_stdout ? '<button class="btn btn-sm btn-outline" onclick="viewLog(\''+id+'\',false)">stdout (' + fmtSize(files.logs.stdout_size) + ')</button>' : '<span style="font-size:12px;color:var(--text2)">no stdout</span>')
-      + (files.logs.has_stderr ? '<button class="btn btn-sm btn-outline" onclick="viewLog(\''+id+'\',true)">stderr (' + fmtSize(files.logs.stderr_size) + ')</button>' : '<span style="font-size:12px;color:var(--text2)">no stderr</span>')
+      + (files.logs.has_stdout ? '<button class="btn btn-sm btn-outline" data-action="view-log" data-job-id="'+esc(id)+'" data-stderr="0">stdout (' + fmtSize(files.logs.stdout_size) + ')</button>' : '<span style="font-size:12px;color:var(--text2)">no stdout</span>')
+      + (files.logs.has_stderr ? '<button class="btn btn-sm btn-outline" data-action="view-log" data-job-id="'+esc(id)+'" data-stderr="1">stderr (' + fmtSize(files.logs.stderr_size) + ')</button>' : '<span style="font-size:12px;color:var(--text2)">no stderr</span>')
       + '</div></div>'
       + '<pre id="logContent" style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px;font-size:12px;max-height:200px;overflow:auto;white-space:pre-wrap;display:none"></pre>'
       + '</div>';
@@ -308,7 +300,7 @@ async function showJobDetail(id) {
         html += '<div style="margin-top:8px">'
           + '<label style="font-size:12px">Upload files</label>'
           + '<input id="jdUpload" type="file" multiple style="padding:6px;font-size:12px">'
-          + '<button class="btn btn-sm btn-primary" style="margin-top:4px" onclick="uploadToJob(\''+id+'\')">Upload</button>'
+          + '<button class="btn btn-sm btn-primary" style="margin-top:4px" data-action="upload-job" data-job-id="'+esc(id)+'">Upload</button>'
           + '</div>';
       }
       html += '</div>';
@@ -321,12 +313,12 @@ async function showJobDetail(id) {
         + '<table style="font-size:12px;margin-top:6px"><thead><tr><th>Name</th><th>Size</th><th></th></tr></thead><tbody>';
       files.output.forEach(f => {
         html += '<tr><td>' + esc(f.name) + '</td><td>' + fmtSize(f.size) + '</td>'
-          + '<td><button class="btn btn-sm btn-outline" onclick="downloadFile(\''+id+'\',\''+esc(f.name)+'\')">Download</button></td></tr>';
+          + '<td><button class="btn btn-sm btn-outline" data-action="download-file" data-job-id="'+esc(id)+'" data-filename="'+esc(f.name)+'">Download</button></td></tr>';
       });
       html += '</tbody></table></div>';
     }
 
-    html += '<div class="modal-actions"><button class="btn btn-outline" onclick="closeModal()">Close</button></div>';
+    html += '<div class="modal-actions"><button class="btn btn-outline" data-action="close-modal">Close</button></div>';
     openModal(html);
   } catch(e) { toast('Failed to load job', true); }
 }
@@ -399,17 +391,17 @@ function renderSavedWorkflows() {
     const isOwner = w.owner_id === USER_ID || USER_ROLE === 'admin';
     const favIcon = w.is_favorite ? '\u2605' : '\u2606';
     return '<tr>'
-      + '<td style="cursor:pointer;font-size:18px;width:30px" onclick="wfToggleFavorite(\''+esc(w.id)+'\')" title="Toggle favorite">'+favIcon+'</td>'
+      + '<td style="cursor:pointer;font-size:18px;width:30px" data-action="wf-toggle-favorite" data-workflow-id="'+esc(w.id)+'" title="Toggle favorite">'+favIcon+'</td>'
       + '<td><b>'+esc(w.name)+'</b></td>'
       + '<td>'+stepCount+' step'+(stepCount!==1?'s':'')+'</td>'
       + '<td>'+esc(w.owner_id)+'</td>'
       + '<td>'+(w.is_global ? '<span style="color:var(--accent)">Global</span>' : 'Private')+'</td>'
       + '<td>'+fmtDate(w.updated_at)+'</td>'
       + '<td style="display:flex;gap:4px;flex-wrap:wrap">'
-      + '<button class="btn btn-sm btn-primary" onclick="wfLoadAndRun(\''+esc(w.id)+'\')">Run</button>'
-      + (isOwner ? '<button class="btn btn-sm btn-outline" onclick="wfLoadForEdit(\''+esc(w.id)+'\')">Edit</button>' : '')
-      + '<button class="btn btn-sm btn-outline" onclick="wfDuplicate(\''+esc(w.id)+'\')">Duplicate</button>'
-      + (isOwner ? '<button class="btn btn-sm btn-danger" onclick="wfDeleteSaved(\''+esc(w.id)+'\')">Delete</button>' : '')
+      + '<button class="btn btn-sm btn-primary" data-action="wf-run-saved" data-workflow-id="'+esc(w.id)+'">Run</button>'
+      + (isOwner ? '<button class="btn btn-sm btn-outline" data-action="wf-edit-saved" data-workflow-id="'+esc(w.id)+'">Edit</button>' : '')
+      + '<button class="btn btn-sm btn-outline" data-action="wf-duplicate" data-workflow-id="'+esc(w.id)+'">Duplicate</button>'
+      + (isOwner ? '<button class="btn btn-sm btn-danger" data-action="wf-delete-saved" data-workflow-id="'+esc(w.id)+'">Delete</button>' : '')
       + '</td></tr>';
   }).join('');
 }
@@ -513,8 +505,8 @@ function renderWfField(stepIdx, field, value) {
   if (field.type === 'checkbox') {
     const checked = value === true || value === 'true' ? 'checked' : '';
     return '<label class="checkbox-label" style="font-size:12px;margin-right:14px">'
-      + '<input type="checkbox" id="'+id+'" '+checked
-      + ' onchange="wfFieldChange('+stepIdx+',\''+esc(field.name)+'\',this.checked,\'checkbox\')"> '
+      + '<input type="checkbox" id="'+esc(id)+'" '+checked
+      + ' data-change-action="wf-field" data-step="'+stepIdx+'" data-field-name="'+esc(field.name)+'" data-field-type="checkbox"> '
       + esc(field.label || field.name) + '</label>';
   }
   if (field.type === 'select') {
@@ -523,23 +515,23 @@ function renderWfField(stepIdx, field, value) {
     ).join('');
     return '<div style="display:inline-block;margin-right:12px;margin-bottom:6px">'
       + '<label style="font-size:12px">'+esc(field.label || field.name)+'</label>'
-      + '<select id="'+id+'" onchange="wfFieldChange('+stepIdx+',\''+esc(field.name)+'\',this.value,\'select\')" style="min-width:120px">'
+      + '<select id="'+esc(id)+'" data-change-action="wf-field" data-step="'+stepIdx+'" data-field-name="'+esc(field.name)+'" data-field-type="select" style="min-width:120px">'
       + options + '</select></div>';
   }
   if (field.type === 'number') {
     const numVal = value !== undefined && value !== '' ? value : (field.default || 0);
     return '<div style="display:inline-block;margin-right:12px;margin-bottom:6px">'
       + '<label style="font-size:12px">'+esc(field.label || field.name)+'</label>'
-      + '<input type="number" id="'+id+'" value="'+esc(String(numVal))+'" style="width:100px"'
-      + ' onchange="wfFieldChange('+stepIdx+',\''+esc(field.name)+'\',this.value,\'number\')"></div>';
+      + '<input type="number" id="'+esc(id)+'" value="'+esc(String(numVal))+'" style="width:100px"'
+      + ' data-change-action="wf-field" data-step="'+stepIdx+'" data-field-name="'+esc(field.name)+'" data-field-type="number"></div>';
   }
   /* default: text */
   const txtVal = value !== undefined ? value : (field.default || '');
   return '<div style="display:inline-block;margin-right:12px;margin-bottom:6px">'
     + '<label style="font-size:12px">'+esc(field.label || field.name)+'</label>'
-    + '<input type="text" id="'+id+'" value="'+esc(String(txtVal))+'" style="max-width:180px"'
+    + '<input type="text" id="'+esc(id)+'" value="'+esc(String(txtVal))+'" style="max-width:180px"'
     + ' placeholder="'+esc(field.placeholder || '')+'"'
-    + ' onchange="wfFieldChange('+stepIdx+',\''+esc(field.name)+'\',this.value,\'text\')"></div>';
+    + ' data-change-action="wf-field" data-step="'+stepIdx+'" data-field-name="'+esc(field.name)+'" data-field-type="text"></div>';
 }
 
 function wfFieldChange(stepIdx, key, value, fieldType) {
@@ -592,7 +584,7 @@ function renderWorkflowSteps(name, isGlobal, runMode) {
       const depApp = APPS_CACHE.find(a => a.app_id === _wfSteps[d].app_id);
       const depLabel = 'Step '+(d+1)+(depApp ? ' ('+esc(depApp.name||depApp.app_id)+')' : '');
       depChecks += '<label class="checkbox-label" style="font-size:12px;margin-right:10px">'
-        + '<input type="checkbox" onchange="wfToggleDep('+i+','+d+')" '+checked+'> '+depLabel
+        + '<input type="checkbox" data-change-action="wf-toggle-dep" data-step="'+i+'" data-dependency="'+d+'" '+checked+'> '+depLabel
         + '</label>';
     }
 
@@ -610,15 +602,15 @@ function renderWorkflowSteps(name, isGlobal, runMode) {
     html += '<div class="card" style="padding:12px;margin-bottom:10px;border-left:3px solid var(--accent)">'
       + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
       + '<b>Step '+(i+1)+(app?' — '+esc(app.name||app.app_id):'')+'</b>'
-      + '<button class="btn btn-sm btn-danger" onclick="wfRemoveStep('+i+')">Remove</button>'
+      + '<button class="btn btn-sm btn-danger" data-action="wf-remove-step" data-step="'+i+'">Remove</button>'
       + '</div>'
       + '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px">'
       + '<div><label style="font-size:12px">Application</label>'
-      + '<select onchange="wfAppChange('+i+',this.value)" style="min-width:180px">'+appOpts+'</select></div>'
+      + '<select data-change-action="wf-app" data-step="'+i+'" style="min-width:180px">'+appOpts+'</select></div>'
       + '<div><label style="font-size:12px">Priority</label>'
-      + '<input type="number" value="'+step.priority+'" min="0" max="100" style="width:70px" onchange="wfSetPriority('+i+',this.value)"></div>'
+      + '<input type="number" value="'+esc(step.priority)+'" min="0" max="100" style="width:70px" data-change-action="wf-priority" data-step="'+i+'"></div>'
       + '<div><label style="font-size:12px">Timeout (s)</label>'
-      + '<input type="number" value="'+step.timeout_seconds+'" min="0" style="width:80px" onchange="wfSetTimeout('+i+',this.value)"></div>'
+      + '<input type="number" value="'+esc(step.timeout_seconds)+'" min="0" style="width:80px" data-change-action="wf-timeout" data-step="'+i+'"></div>'
       + '</div>'
       + (app ? '<div class="resource-bar" style="margin-bottom:8px;font-size:12px;display:flex;gap:12px;color:var(--text2)">'
         + '<span>Cores: '+(app.req_cores||1)+'</span>'
@@ -628,24 +620,24 @@ function renderWorkflowSteps(name, isGlobal, runMode) {
         + '</div>' : '')
       + (paramFields ? '<div style="margin-bottom:8px;display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px">'+paramFields+'</div>' : '')
       + '<div style="margin-bottom:8px"><label style="font-size:12px">Input Files</label>'
-      + '<input type="file" multiple style="padding:6px;font-size:12px" onchange="wfSetFiles('+i+',this)">'
+      + '<input type="file" multiple style="padding:6px;font-size:12px" data-change-action="wf-files" data-step="'+i+'">'
       + (step._files && step._files.length ? '<span style="font-size:11px;color:var(--text2);margin-left:8px">'+step._files.length+' file(s) selected</span>' : '')
       + '</div>'
       + (i > 0 ? '<div><label style="font-size:12px">Depends on:</label> '+depChecks
         + (step.depends_on_steps.length ? '<label class="checkbox-label" style="font-size:12px;margin-left:14px">'
-          + '<input type="checkbox" onchange="_wfSteps['+i+'].same_machine=this.checked" '+(step.same_machine?'checked':'')
+          + '<input type="checkbox" data-change-action="wf-same-machine" data-step="'+i+'" '+(step.same_machine?'checked':'')
           + '> Use same machine</label>' : '')
         + '</div>' : '')
       + '</div>';
   });
 
   html += '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
-    + '<button class="btn btn-sm btn-outline" onclick="wfAddStep()">+ Add Step</button>';
+    + '<button class="btn btn-sm btn-outline" data-action="wf-add-step">+ Add Step</button>';
   if (!runMode) {
-    html += '<button class="btn btn-sm btn-outline" onclick="wfSave(false)">'+(_wfEditId?'Update':'Save')+' Workflow</button>';
+    html += '<button class="btn btn-sm btn-outline" data-action="wf-save">'+(_wfEditId?'Update':'Save')+' Workflow</button>';
   }
-  html += '<button class="btn btn-sm btn-primary" onclick="wfSubmit()">Run Workflow</button>'
-    + '<button class="btn btn-sm btn-outline" onclick="hideWorkflowEditor()">Cancel</button>'
+  html += '<button class="btn btn-sm btn-primary" data-action="wf-submit">Run Workflow</button>'
+    + '<button class="btn btn-sm btn-outline" data-action="wf-hide">Cancel</button>'
     + '</div>';
 
   container.innerHTML = html;
@@ -696,20 +688,11 @@ function wfRerender() {
 
 function collectWfSteps() {
   return _wfSteps.map(s => {
-    const params = {};
-    Object.entries(s.parameters).forEach(([k, v]) => { params[k] = String(v); });
-    const obj = { app_id: s.app_id, parameters: params, priority: s.priority };
+    const obj = { app_id: s.app_id, parameters: { ...s.parameters }, priority: s.priority };
     if (s.timeout_seconds > 0) obj.timeout_seconds = s.timeout_seconds;
     if (s.depends_on_steps.length) obj.depends_on_steps = [...s.depends_on_steps];
     if (s.same_machine && s.depends_on_steps.length) obj.same_machine = true;
     if (s._files && s._files.length) obj.input_files = s._files.map(f => f.name);
-    const app = APPS_CACHE.find(a => a.app_id === s.app_id);
-    if (app) {
-      if (app.req_cores) obj.req_cores = app.req_cores;
-      if (app.req_ram_mb) obj.req_ram_mb = app.req_ram_mb;
-      if (app.req_gpu) obj.req_gpu = app.req_gpu;
-      if (app.req_disk_mb) obj.req_disk_mb = app.req_disk_mb;
-    }
     return obj;
   });
 }

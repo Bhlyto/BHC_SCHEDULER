@@ -2,6 +2,8 @@
 #include "db.h"
 #include "log.h"
 #include "events.h"
+#include "transfer.h"
+#include "cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -42,9 +44,9 @@ static int transition_allowed(JobStatus from, JobStatus to)
 {
     switch (from) {
         case JOB_STATUS_HELD:      return to == JOB_STATUS_IN_QUEUE   || to == JOB_STATUS_CANCELLED;
-        case JOB_STATUS_IN_QUEUE:  return to == JOB_STATUS_STARTING  || to == JOB_STATUS_CANCELLED;
+        case JOB_STATUS_IN_QUEUE:  return to == JOB_STATUS_STARTING  || to == JOB_STATUS_CANCELLED || to == JOB_STATUS_FAILED;
         case JOB_STATUS_STARTING:  return to == JOB_STATUS_RUNNING   || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
-        case JOB_STATUS_RUNNING:   return to == JOB_STATUS_FINISHED  || to == JOB_STATUS_FAILED;
+        case JOB_STATUS_RUNNING:   return to == JOB_STATUS_FINISHED  || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
         default:                   return 0; /* terminal states */
     }
 }
@@ -91,8 +93,14 @@ Job *job_create_ex(const char *command, int priority,
     job->req_ram_mb  = req_ram_mb > 0 ? req_ram_mb  : 0;
     job->req_disk_mb = req_disk_mb> 0 ? req_disk_mb : 0;
     job->submitted_at = time(NULL);
+    store_input_dir(job->id, job->input_dir, sizeof(job->input_dir));
+    store_output_dir(job->id, job->output_dir, sizeof(job->output_dir));
 
-    db_insert_job(job);
+    if (db_insert_job(job) != 0) {
+        log_error("job", "Failed to persist new job %s", job->id);
+        free(job);
+        return NULL;
+    }
     log_info("job", "Created job %s: %s (user=%s app=%s)",
              job->id, job->command, job->user_id, job->app_id);
     return job;
@@ -143,13 +151,20 @@ int job_set_status_r(Job *job, JobStatus new_status, const char *reason)
     if (reason && reason[0])
         db_update_status_reason(job->id, reason);
 
-    char evt[EVENTS_JSON_MAX];
-    snprintf(evt, sizeof(evt),
-        "{\"event\":\"job_status\",\"id\":\"%s\",\"status\":\"%s\","
-        "\"machine_id\":\"%s\",\"reason\":\"%s\"}",
-        job->id, job_status_str(new_status), job->machine_id,
-        reason ? reason : "");
-    events_push(evt);
+    cJSON *event = cJSON_CreateObject();
+    if (event) {
+        cJSON_AddStringToObject(event, "event", "job_status");
+        cJSON_AddStringToObject(event, "id", job->id);
+        cJSON_AddStringToObject(event, "status", job_status_str(new_status));
+        cJSON_AddStringToObject(event, "machine_id", job->machine_id);
+        cJSON_AddStringToObject(event, "reason", reason ? reason : "");
+        char *serialized = cJSON_PrintUnformatted(event);
+        if (serialized) {
+            events_push_user(serialized, job->user_id);
+            free(serialized);
+        }
+        cJSON_Delete(event);
+    }
 
     return 0;
 }

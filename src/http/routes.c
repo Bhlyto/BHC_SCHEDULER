@@ -14,6 +14,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
+#include <ctype.h>
+#include <math.h>
+#include <errno.h>
+#include <limits.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -47,11 +51,67 @@
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
 /* Clamp a double to int within [lo, hi] */
+static int s_accepting_jobs = 1;
+
 static int clamp_int(double v, int lo, int hi)
 {
     if (v < (double)lo) return lo;
     if (v > (double)hi) return hi;
     return (int)v;
+}
+
+static int parse_query_int(struct mg_http_message *hm, const char *name,
+                           int default_value, int min_value, int max_value,
+                           int *out_value)
+{
+    char value[64] = {0};
+    int length = mg_http_get_var(&hm->query, name, value, sizeof(value));
+    if (length <= 0) {
+        *out_value = default_value;
+        return 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(value, &end, 10);
+    if (errno == ERANGE || end == value || *end != '\0' ||
+        parsed < min_value || parsed > max_value || parsed > INT_MAX) {
+        return -1;
+    }
+    *out_value = (int)parsed;
+    return 0;
+}
+
+static int json_optional_int(cJSON *object, const char *name,
+                             int min_value, int max_value, int *out_value)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(object, name);
+    if (!item) return 0;
+    if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble) ||
+        floor(item->valuedouble) != item->valuedouble ||
+        item->valuedouble < min_value || item->valuedouble > max_value) {
+        return -1;
+    }
+    *out_value = (int)item->valuedouble;
+    return 1;
+}
+
+static int copy_optional_string(cJSON *object, const char *name,
+                                char *out, size_t out_len)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(object, name);
+    if (!item) return 0;
+    if (!cJSON_IsString(item) || strlen(item->valuestring) >= out_len) return -1;
+    memcpy(out, item->valuestring, strlen(item->valuestring) + 1);
+    return 1;
+}
+
+static int safe_cloud_arg(const char *value)
+{
+    if (!value || !value[0] || value[0] == '-') return 0;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (!isalnum(*p) && !strchr("-_./:,=", *p)) return 0;
+    }
+    return 1;
 }
 
 static void extract_segment(const char *uri, int seg_index, char *out, int out_len)
@@ -137,7 +197,7 @@ static const char *mime_for_ext(const char *path)
 static void serve_web_file(struct mg_connection *c, const char *file_path)
 {
     /* Reject path traversal: encoded dots, null bytes, absolute paths, backslashes */
-    if (strstr(file_path, "..") || strchr(file_path, '\0') ||
+    if (strstr(file_path, "..") ||
         strchr(file_path, '\\') || file_path[0] == '/' ||
         strstr(file_path, "%2e") || strstr(file_path, "%2E") ||
         strstr(file_path, "%00")) {
@@ -158,16 +218,27 @@ static void serve_web_file(struct mg_connection *c, const char *file_path)
     if (!f) { http_error(c, 404, "Not found"); return; }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
+    if (sz < 0 || sz > 16 * 1024 * 1024) {
+        fclose(f);
+        http_error(c, 413, "Static file too large");
+        return;
+    }
     fseek(f, 0, SEEK_SET);
-    char *buf = (char *)malloc(sz + 1);
+    char *buf = (char *)malloc(sz > 0 ? (size_t)sz : 1);
     if (!buf) { fclose(f); http_error(c, 500, "Out of memory"); return; }
-    fread(buf, 1, sz, f);
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        free(buf);
+        fclose(f);
+        http_error(c, 500, "Failed to read static file");
+        return;
+    }
     fclose(f);
-    buf[sz] = '\0';
 
-    char hdrs[256];
-    snprintf(hdrs, sizeof(hdrs), "Content-Type: %s\r\nCache-Control: no-cache\r\n", mime_for_ext(file_path));
-    mg_http_reply(c, 200, hdrs, "%s", buf);
+    char hdrs[1536] = {0};
+    http_build_headers(hdrs, sizeof(hdrs), mime_for_ext(file_path));
+    strncat(hdrs, "Cache-Control: no-cache\r\n", sizeof(hdrs) - strlen(hdrs) - 1);
+    mg_printf(c, "HTTP/1.1 200 OK\r\n%sContent-Length: %ld\r\n\r\n", hdrs, sz);
+    if (sz > 0) mg_send(c, buf, (size_t)sz);
     free(buf);
 }
 
@@ -178,28 +249,38 @@ static void serve_web_ui(struct mg_connection *c)
 
 /* ── Public auth handlers (no API key required) ──────────────────── */
 
-static void generate_api_key_for_user(const char *user_id, const char *role,
-                                      char *out_raw_hex, char *out_hash)
+static int safe_cli_name(const char *name);
+
+static int generate_api_key_for_user(const char *user_id, const char *role,
+                                     char *out_raw_hex, char *out_hash)
 {
-    unsigned char raw[32];
+    unsigned char raw[32] = {0};
 #ifdef _WIN32
     {
-        HCRYPTPROV hprov;
-        CryptAcquireContextA(&hprov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT);
-        CryptGenRandom(hprov, sizeof(raw), raw);
+        HCRYPTPROV hprov = 0;
+        if (!CryptAcquireContextA(&hprov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
+            return -1;
+        if (!CryptGenRandom(hprov, sizeof(raw), raw)) {
+            CryptReleaseContext(hprov, 0);
+            return -1;
+        }
         CryptReleaseContext(hprov, 0);
     }
 #else
     {
         FILE *urnd = fopen("/dev/urandom", "rb");
-        if (urnd) { fread(raw, 1, sizeof(raw), urnd); fclose(urnd); }
+        if (!urnd || fread(raw, 1, sizeof(raw), urnd) != sizeof(raw)) {
+            if (urnd) fclose(urnd);
+            return -1;
+        }
+        fclose(urnd);
     }
 #endif
     for (int i = 0; i < 32; i++) sprintf(out_raw_hex + i*2, "%02x", raw[i]);
     out_raw_hex[64] = '\0';
     auth_hash_key(out_raw_hex, out_hash);
     time_t expires = time(NULL) + 86400; /* 24 hours */
-    db_insert_api_key_full(out_hash, "auto-login", role, user_id, expires);
+    return db_insert_api_key_full(out_hash, "auto-login", role, user_id, expires);
 }
 
 /* POST /auth/login — public, no API key needed */
@@ -257,9 +338,10 @@ static void auth_login(struct mg_connection *c, struct mg_http_message *hm)
     cJSON *juid = cJSON_GetObjectItemCaseSensitive(req, "user_id");
     cJSON *jpwd = cJSON_GetObjectItemCaseSensitive(req, "password");
     if (!cJSON_IsString(juid) || !cJSON_IsString(jpwd) ||
-        !juid->valuestring[0] || !jpwd->valuestring[0]) {
+        !juid->valuestring[0] || !jpwd->valuestring[0] ||
+        !safe_cli_name(juid->valuestring) || strlen(jpwd->valuestring) > 128) {
         cJSON_Delete(req);
-        http_error(c, 400, "Missing 'user_id' and/or 'password'");
+        http_error(c, 400, "Invalid 'user_id' and/or 'password'");
         return;
     }
 
@@ -271,7 +353,7 @@ static void auth_login(struct mg_connection *c, struct mg_http_message *hm)
     cJSON_Delete(req);
 
     /* Verify password (supports salted + legacy unsalted hashes) */
-    char stored_hash[128] = {0};
+    char stored_hash[AUTH_PASSWORD_HASH_LEN] = {0};
     int enabled = 0;
     if (db_get_user_auth(uid, stored_hash, sizeof(stored_hash), &enabled) != 0 ||
         !auth_verify_password(password, stored_hash)) {
@@ -282,21 +364,42 @@ static void auth_login(struct mg_connection *c, struct mg_http_message *hm)
         http_error(c, 403, "Account disabled");
         return;
     }
+    if (auth_password_needs_rehash(stored_hash)) {
+        char upgraded_hash[AUTH_PASSWORD_HASH_LEN];
+        if (auth_hash_password(password, upgraded_hash) != 0 ||
+            db_set_user_password(uid, upgraded_hash) != 0) {
+            log_warn("auth", "Could not upgrade password hash for user '%s'", uid);
+        }
+    }
 
     /* Find existing valid key or generate a new one */
     char key_hash[65] = {0};
     char raw_hex[65] = {0};
-    if (db_find_user_key(uid, key_hash, sizeof(key_hash))) {
-        db_revoke_api_key(key_hash);
-    }
+    int had_previous_key = db_find_user_key(uid, key_hash, sizeof(key_hash));
     char hash[65];
-    generate_api_key_for_user(uid, "user", raw_hex, hash);
+    if (generate_api_key_for_user(uid, "user", raw_hex, hash) != 0) {
+        http_error(c, 500, "Failed to create login session");
+        return;
+    }
+    if (had_previous_key) db_revoke_api_key(key_hash);
 
     cJSON *resp = cJSON_CreateObject();
-    cJSON_AddStringToObject(resp, "user_id", uid);
-    cJSON_AddStringToObject(resp, "api_key", raw_hex);
-    cJSON_AddStringToObject(resp, "role",    "user");
+    if (!resp ||
+        !cJSON_AddStringToObject(resp, "user_id", uid) ||
+        !cJSON_AddStringToObject(resp, "api_key", raw_hex) ||
+        !cJSON_AddStringToObject(resp, "role", "user")) {
+        cJSON_Delete(resp);
+        db_revoke_api_key(hash);
+        http_error(c, 500, "Out of memory");
+        return;
+    }
     char *s = cJSON_PrintUnformatted(resp);
+    if (!s) {
+        cJSON_Delete(resp);
+        db_revoke_api_key(hash);
+        http_error(c, 500, "Out of memory");
+        return;
+    }
     http_json_reply(c, 200, s);
     free(s);
     cJSON_Delete(resp);
@@ -330,7 +433,7 @@ static void auth_change_password(struct mg_connection *c,
     }
 
     /* Verify old password */
-    char stored_hash[128] = {0};
+    char stored_hash[AUTH_PASSWORD_HASH_LEN] = {0};
     int _enabled = 0;
     if (db_get_user_auth(auth_user_id, stored_hash, sizeof(stored_hash), &_enabled) != 0 ||
         !auth_verify_password(jold->valuestring, stored_hash)) {
@@ -339,9 +442,17 @@ static void auth_change_password(struct mg_connection *c,
         return;
     }
 
-    /* Set new password (salted) */
-    char new_hash[98];
-    auth_hash_password(jnew->valuestring, new_hash);
+    if (strlen(jnew->valuestring) < 12 || strlen(jnew->valuestring) > 128) {
+        cJSON_Delete(req);
+        http_error(c, 400, "New password must contain 12-128 characters");
+        return;
+    }
+    char new_hash[AUTH_PASSWORD_HASH_LEN];
+    if (auth_hash_password(jnew->valuestring, new_hash) != 0) {
+        cJSON_Delete(req);
+        http_error(c, 500, "Failed to generate password hash");
+        return;
+    }
     int rc = db_set_user_password(auth_user_id, new_hash);
     cJSON_Delete(req);
 
@@ -368,6 +479,36 @@ static void auth_methods(struct mg_connection *c, struct mg_http_message *hm)
     cJSON_Delete(resp);
 }
 
+static int job_status_from_text(const char *text)
+{
+    if (!text || !text[0]) return -1;
+    if (strcmp(text, "IN_QUEUE") == 0 || strcmp(text, "QUEUED") == 0) return JOB_STATUS_IN_QUEUE;
+    if (strcmp(text, "STARTING") == 0) return JOB_STATUS_STARTING;
+    if (strcmp(text, "RUNNING") == 0) return JOB_STATUS_RUNNING;
+    if (strcmp(text, "FINISHED") == 0) return JOB_STATUS_FINISHED;
+    if (strcmp(text, "CANCELLED") == 0) return JOB_STATUS_CANCELLED;
+    if (strcmp(text, "FAILED") == 0) return JOB_STATUS_FAILED;
+    if (strcmp(text, "HELD") == 0) return JOB_STATUS_HELD;
+    return -2;
+}
+
+static void auth_me(struct mg_connection *c, const char *user_id, const char *role)
+{
+    cJSON *resp = cJSON_CreateObject();
+    if (!resp) { http_error(c, 500, "Out of memory"); return; }
+    cJSON_AddStringToObject(resp, "user_id", user_id ? user_id : "");
+    cJSON_AddStringToObject(resp, "role", role ? role : "user");
+    char *serialized = cJSON_PrintUnformatted(resp);
+    if (!serialized) {
+        cJSON_Delete(resp);
+        http_error(c, 500, "Out of memory");
+        return;
+    }
+    http_json_reply(c, 200, serialized);
+    free(serialized);
+    cJSON_Delete(resp);
+}
+
 /* forward declaration — defined below with other app routes */
 static void apps_dir_path(char *buf, int len);
 
@@ -379,7 +520,388 @@ static void apps_dir_path(char *buf, int len);
  * Writes app env JSON string into out_env_json (caller must free).
  * Returns 0 on success, -1 on error (writes error into err_buf).
  */
-static int resolve_app_command(const char *app_id, cJSON *user_params,
+typedef struct {
+    int req_cores;
+    int req_gpu;
+    int req_ram_mb;
+    int req_disk_mb;
+} AppResources;
+
+static void app_resources_defaults(AppResources *resources)
+{
+    resources->req_cores = 1;
+    resources->req_gpu = 0;
+    resources->req_ram_mb = 0;
+    resources->req_disk_mb = 0;
+}
+
+static int safe_cli_name(const char *name)
+{
+    if (!name || !name[0] || strlen(name) > 64) return 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        if (!isalnum(*p) && *p != '_' && *p != '-') return 0;
+    }
+    return 1;
+}
+
+static int safe_cli_value(const char *value)
+{
+    if (!value || strlen(value) > 256) return 0;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (!isalnum(*p) && !strchr(" _-./:@+,=", *p)) return 0;
+    }
+    return 1;
+}
+
+static cJSON *find_app_field(cJSON *fields, const char *name)
+{
+    if (!cJSON_IsArray(fields)) return NULL;
+    cJSON *field = NULL;
+    cJSON_ArrayForEach(field, fields) {
+        cJSON *field_name = cJSON_GetObjectItemCaseSensitive(field, "name");
+        if (cJSON_IsString(field_name) && strcmp(field_name->valuestring, name) == 0)
+            return field;
+    }
+    return NULL;
+}
+
+static int parameter_to_text(const char *name, cJSON *definition, cJSON *value,
+                             char *out, size_t out_len,
+                             char *err_buf, int err_len)
+{
+    cJSON *type_item = cJSON_GetObjectItemCaseSensitive(definition, "type");
+    const char *type = cJSON_IsString(type_item) ? type_item->valuestring : "text";
+
+    if (strcmp(type, "checkbox") == 0) {
+        if (!cJSON_IsBool(value)) {
+            snprintf(err_buf, err_len, "Parameter '%s' must be a boolean", name);
+            return -1;
+        }
+        snprintf(out, out_len, "%s", cJSON_IsTrue(value) ? "true" : "false");
+        return 0;
+    }
+
+    if (strcmp(type, "number") == 0) {
+        if (!cJSON_IsNumber(value) || !isfinite(value->valuedouble)) {
+            snprintf(err_buf, err_len, "Parameter '%s' must be a finite number", name);
+            return -1;
+        }
+        cJSON *minimum = cJSON_GetObjectItemCaseSensitive(definition, "min");
+        cJSON *maximum = cJSON_GetObjectItemCaseSensitive(definition, "max");
+        if ((cJSON_IsNumber(minimum) && value->valuedouble < minimum->valuedouble) ||
+            (cJSON_IsNumber(maximum) && value->valuedouble > maximum->valuedouble)) {
+            snprintf(err_buf, err_len, "Parameter '%s' is outside its allowed range", name);
+            return -1;
+        }
+        snprintf(out, out_len, "%.15g", value->valuedouble);
+        return 0;
+    }
+
+    if (!cJSON_IsString(value)) {
+        snprintf(err_buf, err_len, "Parameter '%s' must be a string", name);
+        return -1;
+    }
+    if (!safe_cli_value(value->valuestring)) {
+        snprintf(err_buf, err_len, "Parameter '%s' contains unsupported characters", name);
+        return -1;
+    }
+
+    if (strcmp(type, "select") == 0) {
+        cJSON *options = cJSON_GetObjectItemCaseSensitive(definition, "options");
+        int matched = 0;
+        if (!cJSON_IsArray(options)) {
+            snprintf(err_buf, err_len, "Parameter '%s' has no valid option list", name);
+            return -1;
+        }
+        cJSON *option = NULL;
+        cJSON_ArrayForEach(option, options) {
+            if (cJSON_IsString(option) && strcmp(option->valuestring, value->valuestring) == 0) {
+                matched = 1;
+                break;
+            }
+        }
+        if (!matched) {
+            snprintf(err_buf, err_len, "Parameter '%s' is not an allowed option", name);
+            return -1;
+        }
+    } else if (strcmp(type, "text") != 0) {
+        snprintf(err_buf, err_len, "Parameter '%s' has unsupported type '%s'", name, type);
+        return -1;
+    }
+
+    cJSON *max_length = cJSON_GetObjectItemCaseSensitive(definition, "max_length");
+    if (cJSON_IsNumber(max_length) && max_length->valuedouble >= 0 &&
+        strlen(value->valuestring) > (size_t)max_length->valuedouble) {
+        snprintf(err_buf, err_len, "Parameter '%s' is too long", name);
+        return -1;
+    }
+    snprintf(out, out_len, "%s", value->valuestring);
+    return 0;
+}
+
+static int read_app_resource(cJSON *app, const char *key, int fallback,
+                             int minimum, int maximum, int *out,
+                             char *err_buf, int err_len)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(app, key);
+    if (!item) {
+        *out = fallback;
+        return 0;
+    }
+    if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble) ||
+        item->valuedouble < minimum || item->valuedouble > maximum ||
+        item->valuedouble != floor(item->valuedouble)) {
+        snprintf(err_buf, err_len, "App resource '%s' is invalid", key);
+        return -1;
+    }
+    *out = (int)item->valuedouble;
+    return 0;
+}
+
+static int safe_display_text(const char *value, size_t maximum_length)
+{
+    if (!value || strlen(value) > maximum_length) return 0;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p < 0x20 || *p == 0x7f) return 0;
+    }
+    return 1;
+}
+
+static int validate_app_parameter(const char *name, cJSON *definition,
+                                  int require_type, char *err_buf, int err_len)
+{
+    if (!safe_cli_name(name) || !cJSON_IsObject(definition)) {
+        snprintf(err_buf, err_len, "Invalid app parameter definition");
+        return -1;
+    }
+
+    cJSON *type_item = cJSON_GetObjectItemCaseSensitive(definition, "type");
+    if ((require_type && !cJSON_IsString(type_item)) ||
+        (type_item && !cJSON_IsString(type_item))) {
+        snprintf(err_buf, err_len, "Parameter '%s' must declare a valid type", name);
+        return -1;
+    }
+    const char *type = cJSON_IsString(type_item) ? type_item->valuestring : "text";
+    if (strcmp(type, "checkbox") != 0 && strcmp(type, "select") != 0 &&
+        strcmp(type, "text") != 0 && strcmp(type, "number") != 0) {
+        snprintf(err_buf, err_len, "Parameter '%s' has unsupported type '%s'", name, type);
+        return -1;
+    }
+
+    cJSON *label = cJSON_GetObjectItemCaseSensitive(definition, "label");
+    cJSON *placeholder = cJSON_GetObjectItemCaseSensitive(definition, "placeholder");
+    if ((label && (!cJSON_IsString(label) ||
+                   !safe_display_text(label->valuestring, 128))) ||
+        (placeholder && (!cJSON_IsString(placeholder) ||
+                         !safe_display_text(placeholder->valuestring, 256)))) {
+        snprintf(err_buf, err_len, "Parameter '%s' has invalid display text", name);
+        return -1;
+    }
+
+    cJSON *minimum = cJSON_GetObjectItemCaseSensitive(definition, "min");
+    cJSON *maximum = cJSON_GetObjectItemCaseSensitive(definition, "max");
+    if ((minimum && (!cJSON_IsNumber(minimum) || !isfinite(minimum->valuedouble))) ||
+        (maximum && (!cJSON_IsNumber(maximum) || !isfinite(maximum->valuedouble))) ||
+        (cJSON_IsNumber(minimum) && cJSON_IsNumber(maximum) &&
+         minimum->valuedouble > maximum->valuedouble)) {
+        snprintf(err_buf, err_len, "Parameter '%s' has an invalid numeric range", name);
+        return -1;
+    }
+
+    cJSON *max_length = cJSON_GetObjectItemCaseSensitive(definition, "max_length");
+    if (max_length && (!cJSON_IsNumber(max_length) ||
+                       !isfinite(max_length->valuedouble) ||
+                       floor(max_length->valuedouble) != max_length->valuedouble ||
+                       max_length->valuedouble < 0 || max_length->valuedouble > 256)) {
+        snprintf(err_buf, err_len, "Parameter '%s' has an invalid max_length", name);
+        return -1;
+    }
+
+    if (strcmp(type, "select") == 0) {
+        cJSON *options = cJSON_GetObjectItemCaseSensitive(definition, "options");
+        int option_count = cJSON_IsArray(options) ? cJSON_GetArraySize(options) : 0;
+        if (option_count < 1 || option_count > 100) {
+            snprintf(err_buf, err_len, "Parameter '%s' must define 1-100 options", name);
+            return -1;
+        }
+        cJSON *option = NULL;
+        cJSON_ArrayForEach(option, options) {
+            if (!cJSON_IsString(option) || !safe_cli_value(option->valuestring)) {
+                snprintf(err_buf, err_len, "Parameter '%s' contains an invalid option", name);
+                return -1;
+            }
+            for (cJSON *prior = options->child; prior && prior != option; prior = prior->next) {
+                if (cJSON_IsString(prior) &&
+                    strcmp(prior->valuestring, option->valuestring) == 0) {
+                    snprintf(err_buf, err_len, "Parameter '%s' contains duplicate options", name);
+                    return -1;
+                }
+            }
+        }
+    }
+
+    cJSON *default_value = cJSON_GetObjectItemCaseSensitive(definition, "default");
+    if (default_value) {
+        char ignored[257];
+        if (parameter_to_text(name, definition, default_value, ignored,
+                              sizeof(ignored), err_buf, err_len) != 0) return -1;
+    }
+    return 0;
+}
+
+static int validate_app_definition(cJSON *app, char *err_buf, int err_len)
+{
+    if (!cJSON_IsObject(app)) {
+        snprintf(err_buf, err_len, "App definition must be an object");
+        return -1;
+    }
+
+    cJSON *app_id = cJSON_GetObjectItemCaseSensitive(app, "app_id");
+    cJSON *name = cJSON_GetObjectItemCaseSensitive(app, "name");
+    cJSON *command = cJSON_GetObjectItemCaseSensitive(app, "command_template");
+    if (!cJSON_IsString(app_id) || !safe_cli_name(app_id->valuestring) ||
+        !cJSON_IsString(name) || !name->valuestring[0] ||
+        !safe_display_text(name->valuestring, 128) ||
+        !cJSON_IsString(command) || !command->valuestring[0] ||
+        strlen(command->valuestring) >= JOB_CMD_LEN ||
+        strchr(command->valuestring, '\r') || strchr(command->valuestring, '\n')) {
+        snprintf(err_buf, err_len, "App id, name or command template is invalid");
+        return -1;
+    }
+
+    AppResources resources;
+    if (read_app_resource(app, "req_cores", 1, 1, 10000,
+                          &resources.req_cores, err_buf, err_len) != 0 ||
+        read_app_resource(app, "req_gpu", 0, 0, 1000,
+                          &resources.req_gpu, err_buf, err_len) != 0 ||
+        read_app_resource(app, "req_ram_mb", 0, 0, 10000000,
+                          &resources.req_ram_mb, err_buf, err_len) != 0 ||
+        read_app_resource(app, "req_disk_mb", 0, 0, 10000000,
+                          &resources.req_disk_mb, err_buf, err_len) != 0) return -1;
+
+    cJSON *parameters = cJSON_GetObjectItemCaseSensitive(app, "parameters");
+    cJSON *fields = cJSON_GetObjectItemCaseSensitive(app, "fields");
+    if ((parameters && !cJSON_IsObject(parameters)) ||
+        (fields && !cJSON_IsArray(fields)) ||
+        (parameters && cJSON_GetArraySize(parameters) > 64) ||
+        (fields && cJSON_GetArraySize(fields) > 64)) {
+        snprintf(err_buf, err_len, "App fields or parameters are invalid");
+        return -1;
+    }
+
+    if (parameters) {
+        cJSON *definition = NULL;
+        cJSON_ArrayForEach(definition, parameters) {
+            if (validate_app_parameter(definition->string, definition, 0,
+                                       err_buf, err_len) != 0) return -1;
+            for (cJSON *prior = parameters->child; prior && prior != definition;
+                 prior = prior->next) {
+                if (prior->string && strcmp(prior->string, definition->string) == 0) {
+                    snprintf(err_buf, err_len, "Duplicate parameter '%s'", definition->string);
+                    return -1;
+                }
+            }
+        }
+    }
+
+    if (fields) {
+        cJSON *field = NULL;
+        cJSON_ArrayForEach(field, fields) {
+            cJSON *field_name = cJSON_GetObjectItemCaseSensitive(field, "name");
+            if (!cJSON_IsString(field_name) ||
+                validate_app_parameter(field_name->valuestring, field, 1,
+                                       err_buf, err_len) != 0) return -1;
+            if (parameters &&
+                cJSON_GetObjectItemCaseSensitive(parameters, field_name->valuestring)) {
+                snprintf(err_buf, err_len, "Duplicate parameter '%s'", field_name->valuestring);
+                return -1;
+            }
+            for (cJSON *prior = fields->child; prior && prior != field; prior = prior->next) {
+                cJSON *prior_name = cJSON_GetObjectItemCaseSensitive(prior, "name");
+                if (cJSON_IsString(prior_name) &&
+                    strcmp(prior_name->valuestring, field_name->valuestring) == 0) {
+                    snprintf(err_buf, err_len, "Duplicate field '%s'", field_name->valuestring);
+                    return -1;
+                }
+            }
+        }
+    }
+
+    cJSON *env = cJSON_GetObjectItemCaseSensitive(app, "env");
+    if (env) {
+        if (!cJSON_IsObject(env) || cJSON_GetArraySize(env) > 64) {
+            snprintf(err_buf, err_len, "App environment is invalid");
+            return -1;
+        }
+        cJSON *entry = NULL;
+        cJSON_ArrayForEach(entry, env) {
+            if (!safe_cli_name(entry->string) || !cJSON_IsString(entry) ||
+                strlen(entry->valuestring) > 1024 ||
+                strchr(entry->valuestring, '\r') || strchr(entry->valuestring, '\n')) {
+                snprintf(err_buf, err_len, "App environment contains an invalid entry");
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static cJSON *load_app_definition(const char *app_id, char *err_buf, int err_len)
+{
+    if (!safe_cli_name(app_id)) {
+        snprintf(err_buf, err_len, "Invalid app_id characters");
+        return NULL;
+    }
+    char dir[512];
+    char path[768];
+    apps_dir_path(dir, sizeof(dir));
+#ifdef _WIN32
+    _snprintf(path, sizeof(path), "%s\\%s.json", dir, app_id);
+#else
+    snprintf(path, sizeof(path), "%s/%s.json", dir, app_id);
+#endif
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        snprintf(err_buf, err_len, "App not found: %s", app_id);
+        return NULL;
+    }
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    rewind(file);
+    if (size <= 0 || size > 65536) {
+        fclose(file);
+        snprintf(err_buf, err_len, "App file invalid or too large");
+        return NULL;
+    }
+    char *data = (char *)malloc((size_t)size + 1);
+    if (!data || fread(data, 1, (size_t)size, file) != (size_t)size) {
+        free(data);
+        fclose(file);
+        snprintf(err_buf, err_len, "Failed to read app definition");
+        return NULL;
+    }
+    fclose(file);
+    data[size] = '\0';
+    cJSON *app = cJSON_Parse(data);
+    free(data);
+    if (!app) {
+        snprintf(err_buf, err_len, "App JSON parse error");
+        return NULL;
+    }
+    if (validate_app_definition(app, err_buf, err_len) != 0) {
+        cJSON_Delete(app);
+        return NULL;
+    }
+    cJSON *stored_id = cJSON_GetObjectItemCaseSensitive(app, "app_id");
+    if (!cJSON_IsString(stored_id) || strcmp(stored_id->valuestring, app_id) != 0) {
+        cJSON_Delete(app);
+        snprintf(err_buf, err_len, "App id does not match its filename");
+        return NULL;
+    }
+    return app;
+}
+
+static int resolve_app_command_legacy(const char *app_id, cJSON *user_params,
                                char *out_cmd, int out_cmd_len,
                                char **out_env_json,
                                char *err_buf, int err_len)
@@ -415,7 +937,13 @@ static int resolve_app_command(const char *app_id, cJSON *user_params,
         return -1;
     }
     char *data = (char *)malloc(sz + 1);
-    fread(data, 1, sz, f); fclose(f); data[sz] = '\0';
+    if (!data || fread(data, 1, sz, f) != (size_t)sz) {
+        free(data);
+        fclose(f);
+        snprintf(err_buf, err_len, "Failed to read app definition");
+        return -1;
+    }
+    fclose(f); data[sz] = '\0';
 
     cJSON *app = cJSON_Parse(data);
     free(data);
@@ -438,6 +966,7 @@ static int resolve_app_command(const char *app_id, cJSON *user_params,
 
     /* Substitute {{key}} placeholders with user parameter values */
     cJSON *app_params = cJSON_GetObjectItemCaseSensitive(app, "parameters");
+    cJSON *jfields = cJSON_GetObjectItemCaseSensitive(app, "fields");
     if (user_params && cJSON_IsObject(user_params)) {
         cJSON *p = NULL;
         cJSON_ArrayForEach(p, user_params) {
@@ -458,7 +987,7 @@ static int resolve_app_command(const char *app_id, cJSON *user_params,
             /* Check if parameter is declared in app definition */
             if (app_params) {
                 cJSON *decl = cJSON_GetObjectItemCaseSensitive(app_params, p->string);
-                if (!decl) {
+                if (!decl && !find_app_field(jfields, p->string)) {
                     cJSON_Delete(app);
                     snprintf(err_buf, err_len,
                         "Unknown parameter '%s' for app '%s'", p->string, app_id);
@@ -524,7 +1053,6 @@ static int resolve_app_command(const char *app_id, cJSON *user_params,
     }
 
     /* Append CLI flags from app "fields" for fields not handled by {{key}} */
-    cJSON *jfields = cJSON_GetObjectItemCaseSensitive(app, "fields");
     if (jfields && cJSON_IsArray(jfields)) {
         cJSON *field = NULL;
         cJSON_ArrayForEach(field, jfields) {
@@ -589,9 +1117,227 @@ static int resolve_app_command(const char *app_id, cJSON *user_params,
     return 0;
 }
 
-static void submit_job(struct mg_connection *c, struct mg_http_message *hm,
-                       const char *auth_user_id)
+static int resolve_app_command(const char *app_id, cJSON *user_params,
+                               char *out_cmd, int out_cmd_len,
+                               char **out_env_json,
+                               AppResources *out_resources,
+                               char *err_buf, int err_len)
 {
+    if (err_len > 0) err_buf[0] = '\0';
+    *out_env_json = NULL;
+    if (out_resources) app_resources_defaults(out_resources);
+    if (user_params && !cJSON_IsObject(user_params)) {
+        snprintf(err_buf, err_len, "'parameters' must be an object");
+        return -1;
+    }
+
+    cJSON *app = load_app_definition(app_id, err_buf, err_len);
+    if (!app) return -1;
+    cJSON *template_item = cJSON_GetObjectItemCaseSensitive(app, "command_template");
+    cJSON *app_params = cJSON_GetObjectItemCaseSensitive(app, "parameters");
+    cJSON *fields = cJSON_GetObjectItemCaseSensitive(app, "fields");
+    if (!cJSON_IsString(template_item) || !template_item->valuestring[0] ||
+        (app_params && !cJSON_IsObject(app_params)) ||
+        (fields && !cJSON_IsArray(fields))) {
+        cJSON_Delete(app);
+        snprintf(err_buf, err_len, "Invalid app definition");
+        return -1;
+    }
+
+    AppResources resources;
+    app_resources_defaults(&resources);
+    if (read_app_resource(app, "req_cores", 1, 1, 10000,
+                          &resources.req_cores, err_buf, err_len) != 0 ||
+        read_app_resource(app, "req_gpu", 0, 0, 1000,
+                          &resources.req_gpu, err_buf, err_len) != 0 ||
+        read_app_resource(app, "req_ram_mb", 0, 0, 10000000,
+                          &resources.req_ram_mb, err_buf, err_len) != 0 ||
+        read_app_resource(app, "req_disk_mb", 0, 0, 10000000,
+                          &resources.req_disk_mb, err_buf, err_len) != 0) {
+        cJSON_Delete(app);
+        return -1;
+    }
+
+    if (user_params) {
+        cJSON *supplied = NULL;
+        cJSON_ArrayForEach(supplied, user_params) {
+            cJSON *definition = find_app_field(fields, supplied->string);
+            if (!definition && app_params)
+                definition = cJSON_GetObjectItemCaseSensitive(app_params, supplied->string);
+            if (!safe_cli_name(supplied->string) || !cJSON_IsObject(definition)) {
+                cJSON_Delete(app);
+                snprintf(err_buf, err_len, "Unknown parameter '%s' for app '%s'",
+                         supplied->string ? supplied->string : "", app_id);
+                return -1;
+            }
+            char ignored[257];
+            if (parameter_to_text(supplied->string, definition, supplied,
+                                  ignored, sizeof(ignored), err_buf, err_len) != 0) {
+                cJSON_Delete(app);
+                return -1;
+            }
+        }
+    }
+
+    cJSON *normalized = cJSON_CreateObject();
+    if (!normalized) {
+        cJSON_Delete(app);
+        snprintf(err_buf, err_len, "Out of memory");
+        return -1;
+    }
+
+    if (app_params) {
+        cJSON *definition = NULL;
+        cJSON_ArrayForEach(definition, app_params) {
+            if (!safe_cli_name(definition->string) || !cJSON_IsObject(definition)) {
+                cJSON_Delete(normalized);
+                cJSON_Delete(app);
+                snprintf(err_buf, err_len, "Invalid app parameter definition");
+                return -1;
+            }
+            cJSON *value = user_params
+                         ? cJSON_GetObjectItemCaseSensitive(user_params, definition->string) : NULL;
+            if (!value) value = cJSON_GetObjectItemCaseSensitive(definition, "default");
+            if (!value) {
+                char placeholder[140];
+                snprintf(placeholder, sizeof(placeholder), "{{%s}}", definition->string);
+                if (strstr(template_item->valuestring, placeholder)) {
+                    cJSON_Delete(normalized);
+                    cJSON_Delete(app);
+                    snprintf(err_buf, err_len, "Required parameter '%s' not provided", definition->string);
+                    return -1;
+                }
+                continue;
+            }
+            char value_text[257];
+            if (parameter_to_text(definition->string, definition, value,
+                                  value_text, sizeof(value_text), err_buf, err_len) != 0 ||
+                !cJSON_AddStringToObject(normalized, definition->string, value_text)) {
+                if (!err_buf[0]) snprintf(err_buf, err_len, "Out of memory");
+                cJSON_Delete(normalized);
+                cJSON_Delete(app);
+                return -1;
+            }
+        }
+    }
+
+    if (fields) {
+        cJSON *field = NULL;
+        cJSON_ArrayForEach(field, fields) {
+            cJSON *name_item = cJSON_GetObjectItemCaseSensitive(field, "name");
+            cJSON *type_item = cJSON_GetObjectItemCaseSensitive(field, "type");
+            if (!cJSON_IsString(name_item) || !safe_cli_name(name_item->valuestring) ||
+                !cJSON_IsString(type_item)) {
+                cJSON_Delete(normalized);
+                cJSON_Delete(app);
+                snprintf(err_buf, err_len, "Invalid app field definition");
+                return -1;
+            }
+            if (cJSON_GetObjectItemCaseSensitive(normalized, name_item->valuestring)) continue;
+            cJSON *value = user_params
+                         ? cJSON_GetObjectItemCaseSensitive(user_params, name_item->valuestring) : NULL;
+            if (!value) value = cJSON_GetObjectItemCaseSensitive(field, "default");
+            char value_text[257];
+            if (!value) {
+                if (strcmp(type_item->valuestring, "checkbox") == 0) {
+                    snprintf(value_text, sizeof(value_text), "false");
+                } else {
+                    char placeholder[140];
+                    snprintf(placeholder, sizeof(placeholder), "{{%s}}", name_item->valuestring);
+                    if (strstr(template_item->valuestring, placeholder)) {
+                        cJSON_Delete(normalized);
+                        cJSON_Delete(app);
+                        snprintf(err_buf, err_len, "Required parameter '%s' not provided", name_item->valuestring);
+                        return -1;
+                    }
+                    continue;
+                }
+            } else if (parameter_to_text(name_item->valuestring, field, value,
+                                         value_text, sizeof(value_text), err_buf, err_len) != 0) {
+                cJSON_Delete(normalized);
+                cJSON_Delete(app);
+                return -1;
+            }
+            if (!cJSON_AddStringToObject(normalized, name_item->valuestring, value_text)) {
+                cJSON_Delete(normalized);
+                cJSON_Delete(app);
+                snprintf(err_buf, err_len, "Out of memory");
+                return -1;
+            }
+        }
+    }
+
+    cJSON_Delete(app);
+    int result = resolve_app_command_legacy(app_id, normalized,
+                                            out_cmd, out_cmd_len,
+                                            out_env_json, err_buf, err_len);
+    cJSON_Delete(normalized);
+    if (result != 0) return result;
+    if (strstr(out_cmd, "{{") || strstr(out_cmd, "}}")) {
+        free(*out_env_json);
+        *out_env_json = NULL;
+        snprintf(err_buf, err_len, "Command template contains an undeclared placeholder");
+        return -1;
+    }
+    if (out_resources) *out_resources = resources;
+    return 0;
+}
+
+static int extract_idempotency_key(struct mg_http_message *hm,
+                                   char *out, size_t out_len)
+{
+    struct mg_str *header = mg_http_get_header(hm, "Idempotency-Key");
+    if (!header || header->len == 0) {
+        out[0] = '\0';
+        return 0;
+    }
+    if (header->len >= out_len) return -1;
+    memcpy(out, header->buf, header->len);
+    out[header->len] = '\0';
+    for (const unsigned char *p = (const unsigned char *)out; *p; p++) {
+        if (!isalnum(*p) && !strchr("_-.:", *p)) return -1;
+    }
+    return 1;
+}
+
+static void submit_job(struct mg_connection *c, struct mg_http_message *hm,
+                       const char *auth_user_id, const char *auth_role)
+{
+    char idempotency_key[129];
+    int has_idempotency_key = extract_idempotency_key(hm, idempotency_key,
+                                                       sizeof(idempotency_key));
+    if (has_idempotency_key < 0 || (has_idempotency_key && !auth_user_id[0])) {
+        http_error(c, 400, "Idempotency-Key must be 1-128 safe characters and requires a bound user");
+        return;
+    }
+    if (has_idempotency_key) {
+        char existing_job_id[JOB_ID_LEN];
+        int lookup = db_get_submission_job(auth_user_id, idempotency_key,
+                                           existing_job_id, sizeof(existing_job_id));
+        if (lookup < 0) {
+            http_error(c, 500, "Failed to check idempotency key");
+            return;
+        }
+        if (lookup > 0) {
+            Job *existing_job = db_get_job(existing_job_id);
+            if (!existing_job) {
+                http_error(c, 500, "Idempotency record is inconsistent");
+                return;
+            }
+            cJSON *response = job_to_json(existing_job);
+            char *serialized = response ? cJSON_PrintUnformatted(response) : NULL;
+            job_free(existing_job);
+            cJSON_Delete(response);
+            if (!serialized) { http_error(c, 500, "Out of memory"); return; }
+            http_json_reply(c, 200, serialized);
+            free(serialized);
+            return;
+        }
+    }
+    if (!s_accepting_jobs) {
+        http_error(c, 503, "Scheduler is draining and not accepting new jobs");
+        return;
+    }
     char body[4096] = {0};
     size_t blen = hm->body.len < sizeof(body)-1 ? hm->body.len : sizeof(body)-1;
     memcpy(body, hm->body.buf, blen);
@@ -617,6 +1363,9 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm,
     int app_only = (strcmp(g_config.command_mode, "app_only") == 0);
     char resolved_cmd[JOB_CMD_LEN] = {0};
     char *app_env_json = NULL;
+    AppResources app_resources;
+    app_resources_defaults(&app_resources);
+    int use_app_resources = 0;
 
     if (app_only) {
         /* App-only mode: require app_id, reject raw command */
@@ -633,11 +1382,13 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm,
         char err[256];
         if (resolve_app_command(japp->valuestring, jparams,
                                 resolved_cmd, sizeof(resolved_cmd),
-                                &app_env_json, err, sizeof(err)) != 0) {
+                                &app_env_json, &app_resources,
+                                err, sizeof(err)) != 0) {
             cJSON_Delete(req);
             http_error(c, 400, err);
             return;
         }
+        use_app_resources = 1;
     } else {
         /* Free mode: require command */
         if (!cJSON_IsString(jcmd)) {
@@ -653,21 +1404,38 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm,
             char _unused[JOB_CMD_LEN];
             resolve_app_command(japp->valuestring, NULL,
                                 _unused, sizeof(_unused),
-                                &app_env_json, err, sizeof(err));
+                                &app_env_json, NULL, err, sizeof(err));
             /* Ignore errors — env is best-effort in free mode */
         }
     }
 
     char input_files_str[2048] = {0};
     cJSON *jfiles = cJSON_GetObjectItemCaseSensitive(req, "input_files");
+    if (jfiles && !cJSON_IsArray(jfiles)) {
+        free(app_env_json);
+        cJSON_Delete(req);
+        http_error(c, 400, "'input_files' must be an array");
+        return;
+    }
     if (cJSON_IsArray(jfiles)) {
         cJSON *f;
         cJSON_ArrayForEach(f, jfiles) {
-            if (cJSON_IsString(f) && f->valuestring[0]) {
-                if (input_files_str[0])
-                    strncat(input_files_str, ",", sizeof(input_files_str) - strlen(input_files_str) - 1);
-                strncat(input_files_str, f->valuestring, sizeof(input_files_str) - strlen(input_files_str) - 1);
+            if (!cJSON_IsString(f) || !transfer_valid_filename(f->valuestring)) {
+                free(app_env_json);
+                cJSON_Delete(req);
+                http_error(c, 400, "Invalid input filename");
+                return;
             }
+            size_t used = strlen(input_files_str);
+            size_t value_len = strlen(f->valuestring);
+            if (used + (used ? 1 : 0) + value_len + 1 > sizeof(input_files_str)) {
+                free(app_env_json);
+                cJSON_Delete(req);
+                http_error(c, 400, "Input file list is too long");
+                return;
+            }
+            if (used) input_files_str[used++] = ',';
+            memcpy(input_files_str + used, f->valuestring, value_len + 1);
         }
     }
 
@@ -686,7 +1454,9 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm,
             if (cJSON_IsString(dep) && dep->valuestring[0]) {
                 /* Validate that each dep job exists */
                 Job *depjob = db_get_job(dep->valuestring);
-                if (!depjob) {
+                if (!depjob || (strcmp(auth_role, "admin") != 0 &&
+                    (!depjob->user_id[0] || strcmp(depjob->user_id, auth_user_id) != 0))) {
+                    if (depjob) job_free(depjob);
                     cJSON_Delete(req);
                     char err[256];
                     snprintf(err, sizeof(err), "Dependency job not found: %s", dep->valuestring);
@@ -701,7 +1471,9 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm,
         }
     } else if (cJSON_IsString(jdeps) && jdeps->valuestring[0]) {
         Job *depjob = db_get_job(jdeps->valuestring);
-        if (!depjob) {
+        if (!depjob || (strcmp(auth_role, "admin") != 0 &&
+            (!depjob->user_id[0] || strcmp(depjob->user_id, auth_user_id) != 0))) {
+            if (depjob) job_free(depjob);
             cJSON_Delete(req);
             char err[256];
             snprintf(err, sizeof(err), "Dependency job not found: %s", jdeps->valuestring);
@@ -722,10 +1494,14 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm,
     Job *job = job_create_ex(
         resolved_cmd,
         cJSON_IsNumber(jpri)  ? clamp_int(jpri->valuedouble,  0, 100)     : 50,
-        cJSON_IsNumber(jcor)  ? clamp_int(jcor->valuedouble,  1, 10000)   : 1,
-        cJSON_IsNumber(jgpu)  ? clamp_int(jgpu->valuedouble,  0, 1000)    : 0,
-        cJSON_IsNumber(jram)  ? clamp_int(jram->valuedouble,  0, 10000000) : 0,
-        cJSON_IsNumber(jdisk) ? clamp_int(jdisk->valuedouble, 0, 10000000) : 0,
+        use_app_resources ? app_resources.req_cores
+                          : (cJSON_IsNumber(jcor) ? clamp_int(jcor->valuedouble, 1, 10000) : 1),
+        use_app_resources ? app_resources.req_gpu
+                          : (cJSON_IsNumber(jgpu) ? clamp_int(jgpu->valuedouble, 0, 1000) : 0),
+        use_app_resources ? app_resources.req_ram_mb
+                          : (cJSON_IsNumber(jram) ? clamp_int(jram->valuedouble, 0, 10000000) : 0),
+        use_app_resources ? app_resources.req_disk_mb
+                          : (cJSON_IsNumber(jdisk) ? clamp_int(jdisk->valuedouble, 0, 10000000) : 0),
         user_id, app_id
     );
     cJSON_Delete(req);
@@ -759,6 +1535,15 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm,
     if (job_timeout > 0) {
         job->timeout_seconds = job_timeout;
         db_update_job_timeout(job->id, job_timeout);
+    }
+
+    if (has_idempotency_key &&
+        db_store_submission_key(auth_user_id, idempotency_key, job->id) != 0) {
+        job_set_status_r(job, JOB_STATUS_FAILED, "Failed to persist idempotency key");
+        store_cleanup_job(job->id);
+        job_free(job);
+        http_error(c, 500, "Failed to persist idempotency key");
+        return;
     }
 
     if (is_held) {
@@ -998,9 +1783,34 @@ static void toggle_workflow_favorite(struct mg_connection *c,
 
 #define MAX_WORKFLOW_STEPS 64
 
-static void submit_workflow(struct mg_connection *c, struct mg_http_message *hm,
-                            const char *auth_user_id)
+static int append_csv_value(char *buffer, size_t capacity, const char *value)
 {
+    size_t used = strlen(buffer);
+    size_t value_len = strlen(value);
+    size_t separator_len = used > 0 ? 1 : 0;
+    if (used + separator_len + value_len + 1 > capacity) return -1;
+    if (separator_len) buffer[used++] = ',';
+    memcpy(buffer + used, value, value_len + 1);
+    return 0;
+}
+
+static void workflow_discard_jobs(Job **jobs, int count)
+{
+    for (int i = 0; i < count; i++) {
+        if (!jobs[i]) continue;
+        store_cleanup_job(jobs[i]->id);
+        job_free(jobs[i]);
+        jobs[i] = NULL;
+    }
+}
+
+static void submit_workflow(struct mg_connection *c, struct mg_http_message *hm,
+                            const char *auth_user_id, const char *auth_role)
+{
+    if (!s_accepting_jobs) {
+        http_error(c, 503, "Scheduler is draining and not accepting new jobs");
+        return;
+    }
     char body[32768] = {0};
     size_t blen = hm->body.len < sizeof(body)-1 ? hm->body.len : sizeof(body)-1;
     memcpy(body, hm->body.buf, blen);
@@ -1023,29 +1833,35 @@ static void submit_workflow(struct mg_connection *c, struct mg_http_message *hm,
     }
 
     int app_only = (strcmp(g_config.command_mode, "app_only") == 0);
-
-    /* Track created job IDs so we can map step indices to real IDs */
     char job_ids[MAX_WORKFLOW_STEPS][64] = {{0}};
     Job *created_jobs[MAX_WORKFLOW_STEPS] = {NULL};
+    Job *response_jobs = (Job *)calloc((size_t)n_steps, sizeof(Job));
+    char *app_env_json = NULL;
+    char error_message[320] = {0};
+    int error_status = 400;
     int created = 0;
+    int idx = 0;
 
-    /* Generate a batch workflow_id to group these jobs */
+    if (!response_jobs) {
+        cJSON_Delete(req);
+        http_error(c, 500, "Out of memory");
+        return;
+    }
+
     char wf_batch_id[64];
     gen_wf_id(wf_batch_id, sizeof(wf_batch_id));
+    if (db_begin() != 0) {
+        free(response_jobs);
+        cJSON_Delete(req);
+        http_error(c, 503, "Database is busy");
+        return;
+    }
 
     cJSON *step = NULL;
-    int idx = 0;
     cJSON_ArrayForEach(step, jsteps) {
         if (!cJSON_IsObject(step)) {
-            /* Rollback: cancel already-created jobs */
-            for (int r = 0; r < created; r++) {
-                job_set_status_r(created_jobs[r], JOB_STATUS_CANCELLED,
-                                 "Workflow submission failed");
-                job_free(created_jobs[r]);
-            }
-            cJSON_Delete(req);
-            http_error(c, 400, "Each step must be a JSON object");
-            return;
+            snprintf(error_message, sizeof(error_message), "Each step must be a JSON object");
+            goto workflow_error;
         }
 
         cJSON *jcmd    = cJSON_GetObjectItemCaseSensitive(step, "command");
@@ -1058,285 +1874,319 @@ static void submit_workflow(struct mg_connection *c, struct mg_http_message *hm,
         cJSON *jdisk   = cJSON_GetObjectItemCaseSensitive(step, "req_disk_mb");
         cJSON *jtout   = cJSON_GetObjectItemCaseSensitive(step, "timeout_seconds");
         cJSON *jdep_s  = cJSON_GetObjectItemCaseSensitive(step, "depends_on_steps");
-
         if (!jcor)  jcor  = cJSON_GetObjectItemCaseSensitive(step, "cores");
         if (!jgpu)  jgpu  = cJSON_GetObjectItemCaseSensitive(step, "gpu");
         if (!jram)  jram  = cJSON_GetObjectItemCaseSensitive(step, "ram_mb");
         if (!jdisk) jdisk = cJSON_GetObjectItemCaseSensitive(step, "disk_mb");
 
-        /* Resolve command */
         char resolved_cmd[JOB_CMD_LEN] = {0};
-        char *app_env_json = NULL;
-
+        app_env_json = NULL;
+        AppResources app_resources;
+        app_resources_defaults(&app_resources);
+        int use_app_resources = 0;
         if (app_only) {
             if (cJSON_IsString(jcmd)) {
-                for (int r = 0; r < created; r++) {
-                    job_set_status_r(created_jobs[r], JOB_STATUS_CANCELLED, "Workflow submission failed");
-                    job_free(created_jobs[r]);
-                }
-                cJSON_Delete(req);
-                http_error(c, 400, "Raw 'command' not allowed in app_only mode");
-                return;
+                snprintf(error_message, sizeof(error_message),
+                         "Step %d: raw 'command' not allowed in app_only mode", idx);
+                goto workflow_error;
             }
             if (!cJSON_IsString(japp) || !japp->valuestring[0]) {
-                for (int r = 0; r < created; r++) {
-                    job_set_status_r(created_jobs[r], JOB_STATUS_CANCELLED, "Workflow submission failed");
-                    job_free(created_jobs[r]);
-                }
-                cJSON_Delete(req);
-                char err[128];
-                snprintf(err, sizeof(err), "Step %d: missing 'app_id' (required in app_only mode)", idx);
-                http_error(c, 400, err);
-                return;
+                snprintf(error_message, sizeof(error_message),
+                         "Step %d: missing 'app_id' (required in app_only mode)", idx);
+                goto workflow_error;
             }
-            char err[256];
+            char resolve_error[256];
             if (resolve_app_command(japp->valuestring, jparams,
                                     resolved_cmd, sizeof(resolved_cmd),
-                                    &app_env_json, err, sizeof(err)) != 0) {
-                for (int r = 0; r < created; r++) {
-                    job_set_status_r(created_jobs[r], JOB_STATUS_CANCELLED, "Workflow submission failed");
-                    job_free(created_jobs[r]);
-                }
-                cJSON_Delete(req);
-                char msg[320];
-                snprintf(msg, sizeof(msg), "Step %d: %s", idx, err);
-                http_error(c, 400, msg);
-                return;
+                                    &app_env_json, &app_resources,
+                                    resolve_error, sizeof(resolve_error)) != 0) {
+                snprintf(error_message, sizeof(error_message), "Step %d: %s", idx, resolve_error);
+                goto workflow_error;
             }
+            use_app_resources = 1;
+        } else if (cJSON_IsString(jcmd) && jcmd->valuestring[0]) {
+            strncpy(resolved_cmd, jcmd->valuestring, sizeof(resolved_cmd) - 1);
+        } else if (cJSON_IsString(japp) && japp->valuestring[0]) {
+            char resolve_error[256];
+            if (resolve_app_command(japp->valuestring, jparams,
+                                    resolved_cmd, sizeof(resolved_cmd),
+                                    &app_env_json, &app_resources,
+                                    resolve_error, sizeof(resolve_error)) != 0) {
+                snprintf(error_message, sizeof(error_message), "Step %d: %s", idx, resolve_error);
+                goto workflow_error;
+            }
+            use_app_resources = 1;
         } else {
-            if (cJSON_IsString(jcmd)) {
-                strncpy(resolved_cmd, jcmd->valuestring, sizeof(resolved_cmd) - 1);
-            } else if (cJSON_IsString(japp) && japp->valuestring[0]) {
-                char err[256];
-                if (resolve_app_command(japp->valuestring, jparams,
-                                        resolved_cmd, sizeof(resolved_cmd),
-                                        &app_env_json, err, sizeof(err)) != 0) {
-                    for (int r = 0; r < created; r++) {
-                        job_set_status_r(created_jobs[r], JOB_STATUS_CANCELLED, "Workflow submission failed");
-                        job_free(created_jobs[r]);
-                    }
-                    cJSON_Delete(req);
-                    char msg[320];
-                    snprintf(msg, sizeof(msg), "Step %d: %s", idx, err);
-                    http_error(c, 400, msg);
-                    return;
-                }
-            } else {
-                for (int r = 0; r < created; r++) {
-                    job_set_status_r(created_jobs[r], JOB_STATUS_CANCELLED, "Workflow submission failed");
-                    job_free(created_jobs[r]);
-                }
-                cJSON_Delete(req);
-                char msg[128];
-                snprintf(msg, sizeof(msg), "Step %d: missing 'command' or 'app_id'", idx);
-                http_error(c, 400, msg);
-                return;
-            }
+            snprintf(error_message, sizeof(error_message),
+                     "Step %d: missing 'command' or 'app_id'", idx);
+            goto workflow_error;
         }
 
-        /* Build depends_on from step indices -> real job IDs */
         char depends_on_str[2048] = {0};
+        if (jdep_s && !cJSON_IsArray(jdep_s)) {
+            snprintf(error_message, sizeof(error_message),
+                     "Step %d: 'depends_on_steps' must be an array", idx);
+            goto workflow_error;
+        }
         if (cJSON_IsArray(jdep_s)) {
-            cJSON *di = NULL;
-            cJSON_ArrayForEach(di, jdep_s) {
-                if (!cJSON_IsNumber(di)) continue;
-                int dep_idx = (int)di->valuedouble;
-                if (dep_idx < 0 || dep_idx >= created) {
-                    free(app_env_json);
-                    for (int r = 0; r < created; r++) {
-                        job_set_status_r(created_jobs[r], JOB_STATUS_CANCELLED, "Workflow submission failed");
-                        job_free(created_jobs[r]);
-                    }
-                    cJSON_Delete(req);
-                    char msg[128];
-                    snprintf(msg, sizeof(msg),
-                        "Step %d: depends_on_steps[%d] references invalid step", idx, dep_idx);
-                    http_error(c, 400, msg);
-                    return;
+            cJSON *dependency_index = NULL;
+            cJSON_ArrayForEach(dependency_index, jdep_s) {
+                if (!cJSON_IsNumber(dependency_index)) {
+                    snprintf(error_message, sizeof(error_message),
+                             "Step %d: dependency indices must be numbers", idx);
+                    goto workflow_error;
                 }
-                if (depends_on_str[0])
-                    strncat(depends_on_str, ",", sizeof(depends_on_str) - strlen(depends_on_str) - 1);
-                strncat(depends_on_str, job_ids[dep_idx],
-                        sizeof(depends_on_str) - strlen(depends_on_str) - 1);
+                int dep_idx = (int)dependency_index->valuedouble;
+                if (dep_idx < 0 || dep_idx >= created || dependency_index->valuedouble != dep_idx) {
+                    snprintf(error_message, sizeof(error_message),
+                             "Step %d: depends_on_steps references invalid step %d", idx, dep_idx);
+                    goto workflow_error;
+                }
+                if (append_csv_value(depends_on_str, sizeof(depends_on_str), job_ids[dep_idx]) != 0) {
+                    snprintf(error_message, sizeof(error_message), "Step %d: dependency list is too long", idx);
+                    goto workflow_error;
+                }
             }
         }
 
-        /* Also support explicit depends_on with external job IDs */
-        cJSON *jdeps_ext = cJSON_GetObjectItemCaseSensitive(step, "depends_on");
-        if (cJSON_IsArray(jdeps_ext)) {
-            cJSON *dep = NULL;
-            cJSON_ArrayForEach(dep, jdeps_ext) {
-                if (!cJSON_IsString(dep) || !dep->valuestring[0]) continue;
-                Job *depjob = db_get_job(dep->valuestring);
-                if (!depjob) {
-                    free(app_env_json);
-                    for (int r = 0; r < created; r++) {
-                        job_set_status_r(created_jobs[r], JOB_STATUS_CANCELLED, "Workflow submission failed");
-                        job_free(created_jobs[r]);
-                    }
-                    cJSON_Delete(req);
-                    char msg[256];
-                    snprintf(msg, sizeof(msg), "Step %d: dependency job not found: %s",
-                             idx, dep->valuestring);
-                    http_error(c, 400, msg);
-                    return;
+        cJSON *external_deps = cJSON_GetObjectItemCaseSensitive(step, "depends_on");
+        if (external_deps && !cJSON_IsArray(external_deps)) {
+            snprintf(error_message, sizeof(error_message), "Step %d: 'depends_on' must be an array", idx);
+            goto workflow_error;
+        }
+        if (cJSON_IsArray(external_deps)) {
+            cJSON *dependency = NULL;
+            cJSON_ArrayForEach(dependency, external_deps) {
+                if (!cJSON_IsString(dependency) || !dependency->valuestring[0]) {
+                    snprintf(error_message, sizeof(error_message),
+                             "Step %d: dependency IDs must be non-empty strings", idx);
+                    goto workflow_error;
                 }
-                job_free(depjob);
-                if (depends_on_str[0])
-                    strncat(depends_on_str, ",", sizeof(depends_on_str) - strlen(depends_on_str) - 1);
-                strncat(depends_on_str, dep->valuestring,
-                        sizeof(depends_on_str) - strlen(depends_on_str) - 1);
+                Job *dependency_job = db_get_job(dependency->valuestring);
+                if (!dependency_job || (strcmp(auth_role, "admin") != 0 &&
+                    (!dependency_job->user_id[0] ||
+                     strcmp(dependency_job->user_id, auth_user_id) != 0))) {
+                    if (dependency_job) job_free(dependency_job);
+                    snprintf(error_message, sizeof(error_message),
+                             "Step %d: dependency job not found: %s", idx, dependency->valuestring);
+                    goto workflow_error;
+                }
+                job_free(dependency_job);
+                if (append_csv_value(depends_on_str, sizeof(depends_on_str), dependency->valuestring) != 0) {
+                    snprintf(error_message, sizeof(error_message), "Step %d: dependency list is too long", idx);
+                    goto workflow_error;
+                }
             }
         }
 
-        /* Build input_files string from step */
         char input_files_str[2048] = {0};
-        cJSON *jinfiles = cJSON_GetObjectItemCaseSensitive(step, "input_files");
-        if (cJSON_IsArray(jinfiles)) {
-            cJSON *f = NULL;
-            cJSON_ArrayForEach(f, jinfiles) {
-                if (cJSON_IsString(f) && f->valuestring[0]) {
-                    if (input_files_str[0])
-                        strncat(input_files_str, ",", sizeof(input_files_str) - strlen(input_files_str) - 1);
-                    strncat(input_files_str, f->valuestring, sizeof(input_files_str) - strlen(input_files_str) - 1);
+        cJSON *input_files = cJSON_GetObjectItemCaseSensitive(step, "input_files");
+        if (input_files && !cJSON_IsArray(input_files)) {
+            snprintf(error_message, sizeof(error_message), "Step %d: 'input_files' must be an array", idx);
+            goto workflow_error;
+        }
+        if (cJSON_IsArray(input_files)) {
+            cJSON *input_file = NULL;
+            cJSON_ArrayForEach(input_file, input_files) {
+                if (!cJSON_IsString(input_file) || !input_file->valuestring[0] ||
+                    !transfer_valid_filename(input_file->valuestring) ||
+                    append_csv_value(input_files_str, sizeof(input_files_str), input_file->valuestring) != 0) {
+                    snprintf(error_message, sizeof(error_message),
+                             "Step %d: invalid or oversized input file list", idx);
+                    goto workflow_error;
                 }
             }
         }
 
         const char *app_id = cJSON_IsString(japp) ? japp->valuestring : "";
-        int job_timeout = cJSON_IsNumber(jtout) ? clamp_int(jtout->valuedouble, 0, 604800) : 0;
-
         Job *job = job_create_ex(
             resolved_cmd,
-            cJSON_IsNumber(jpri)  ? clamp_int(jpri->valuedouble,  0, 100)     : 50,
-            cJSON_IsNumber(jcor)  ? clamp_int(jcor->valuedouble,  1, 10000)   : 1,
-            cJSON_IsNumber(jgpu)  ? clamp_int(jgpu->valuedouble,  0, 1000)    : 0,
-            cJSON_IsNumber(jram)  ? clamp_int(jram->valuedouble,  0, 10000000) : 0,
-            cJSON_IsNumber(jdisk) ? clamp_int(jdisk->valuedouble, 0, 10000000) : 0,
-            auth_user_id, app_id
-        );
+            cJSON_IsNumber(jpri)  ? clamp_int(jpri->valuedouble, 0, 100) : 50,
+            use_app_resources ? app_resources.req_cores
+                              : (cJSON_IsNumber(jcor) ? clamp_int(jcor->valuedouble, 1, 10000) : 1),
+            use_app_resources ? app_resources.req_gpu
+                              : (cJSON_IsNumber(jgpu) ? clamp_int(jgpu->valuedouble, 0, 1000) : 0),
+            use_app_resources ? app_resources.req_ram_mb
+                              : (cJSON_IsNumber(jram) ? clamp_int(jram->valuedouble, 0, 10000000) : 0),
+            use_app_resources ? app_resources.req_disk_mb
+                              : (cJSON_IsNumber(jdisk) ? clamp_int(jdisk->valuedouble, 0, 10000000) : 0),
+            auth_user_id, app_id);
         if (!job) {
-            free(app_env_json);
-            for (int r = 0; r < created; r++) {
-                job_set_status_r(created_jobs[r], JOB_STATUS_CANCELLED, "Workflow submission failed");
-                job_free(created_jobs[r]);
-            }
-            cJSON_Delete(req);
-            http_error(c, 500, "Failed to create job");
-            return;
+            error_status = 500;
+            snprintf(error_message, sizeof(error_message), "Failed to create workflow job");
+            goto workflow_error;
         }
 
-        /* Store app env */
+        created_jobs[created] = job;
+        strncpy(job_ids[idx], job->id, sizeof(job_ids[idx]) - 1);
+        created++;
+
+        strncpy(job->workflow_id, wf_batch_id, sizeof(job->workflow_id) - 1);
+        strncpy(job->depends_on, depends_on_str, sizeof(job->depends_on) - 1);
+        strncpy(job->input_files, input_files_str, sizeof(job->input_files) - 1);
+        job->timeout_seconds = cJSON_IsNumber(jtout)
+                             ? clamp_int(jtout->valuedouble, 0, 604800) : 0;
+
+        cJSON *same_machine = cJSON_GetObjectItemCaseSensitive(step, "same_machine");
+        if (cJSON_IsTrue(same_machine) && depends_on_str[0]) {
+            const char *comma = strchr(depends_on_str, ',');
+            size_t id_len = comma ? (size_t)(comma - depends_on_str) : strlen(depends_on_str);
+            if (id_len >= sizeof(job->same_machine_as)) id_len = sizeof(job->same_machine_as) - 1;
+            memcpy(job->same_machine_as, depends_on_str, id_len);
+            job->same_machine_as[id_len] = '\0';
+        }
+
+        if (depends_on_str[0] || input_files_str[0]) {
+            job->status = JOB_STATUS_HELD;
+            if (depends_on_str[0] && input_files_str[0])
+                snprintf(job->status_reason, sizeof(job->status_reason),
+                         "Waiting for dependencies and input files");
+            else if (depends_on_str[0])
+                snprintf(job->status_reason, sizeof(job->status_reason),
+                         "Waiting for dependencies: %.210s", depends_on_str);
+            else
+                snprintf(job->status_reason, sizeof(job->status_reason),
+                         "Waiting for input files: %.220s", input_files_str);
+        }
+
+        if (app_env_json || job->status == JOB_STATUS_HELD) {
+            if (store_init_job_dirs(job->id) != 0) {
+                error_status = 500;
+                snprintf(error_message, sizeof(error_message), "Failed to initialize workflow job storage");
+                goto workflow_error;
+            }
+        }
         if (app_env_json) {
-            store_init_job_dirs(job->id);
             char env_path[768];
 #ifdef _WIN32
             snprintf(env_path, sizeof(env_path), "%s\\.app_env.json", job->input_dir);
 #else
             snprintf(env_path, sizeof(env_path), "%s/.app_env.json", job->input_dir);
 #endif
-            FILE *ef = fopen(env_path, "wb");
-            if (ef) { fwrite(app_env_json, 1, strlen(app_env_json), ef); fclose(ef); }
+            FILE *env_file = fopen(env_path, "wb");
+            size_t env_len = strlen(app_env_json);
+            int env_write_failed = !env_file;
+            if (env_file) {
+                if (fwrite(app_env_json, 1, env_len, env_file) != env_len)
+                    env_write_failed = 1;
+                if (fclose(env_file) != 0)
+                    env_write_failed = 1;
+            }
+            if (env_write_failed) {
+                error_status = 500;
+                snprintf(error_message, sizeof(error_message), "Failed to store workflow application environment");
+                goto workflow_error;
+            }
             free(app_env_json);
+            app_env_json = NULL;
         }
 
-        /* Store dependencies */
-        if (depends_on_str[0]) {
-            strncpy(job->depends_on, depends_on_str, sizeof(job->depends_on) - 1);
-            db_update_depends_on(job->id, depends_on_str);
+        if (db_update_job_submission(job) != 0) {
+            error_status = 500;
+            snprintf(error_message, sizeof(error_message), "Failed to persist workflow job details");
+            goto workflow_error;
         }
-
-        /* Same-machine affinity: pin to first dependency's machine */
-        cJSON *jsm = cJSON_GetObjectItemCaseSensitive(step, "same_machine");
-        if (cJSON_IsTrue(jsm) && depends_on_str[0]) {
-            /* Use the first dependency job ID as the affinity target */
-            char first_dep[64] = {0};
-            const char *comma = strchr(depends_on_str, ',');
-            size_t clen = comma ? (size_t)(comma - depends_on_str)
-                                : strlen(depends_on_str);
-            if (clen >= sizeof(first_dep)) clen = sizeof(first_dep) - 1;
-            memcpy(first_dep, depends_on_str, clen);
-            first_dep[clen] = '\0';
-            strncpy(job->same_machine_as, first_dep, sizeof(job->same_machine_as) - 1);
-            db_update_same_machine_as(job->id, first_dep);
-        }
-
-        if (job_timeout > 0) {
-            job->timeout_seconds = job_timeout;
-            db_update_job_timeout(job->id, job_timeout);
-        }
-
-        /* Store input files */
-        if (input_files_str[0]) {
-            strncpy(job->input_files, input_files_str, sizeof(job->input_files) - 1);
-            db_update_input_files(job->id, input_files_str);
-        }
-
-        int is_held = (depends_on_str[0] != '\0' || input_files_str[0] != '\0');
-        if (is_held) {
-            job->status = JOB_STATUS_HELD;
-            db_update_job_status(job->id, JOB_STATUS_HELD, 0, 0);
-            char held_reason[256];
-            if (depends_on_str[0] && input_files_str[0])
-                snprintf(held_reason, sizeof(held_reason),
-                    "Waiting for dependencies and input files");
-            else if (depends_on_str[0])
-                snprintf(held_reason, sizeof(held_reason),
-                    "Waiting for dependencies: %s", depends_on_str);
-            else
-                snprintf(held_reason, sizeof(held_reason),
-                    "Waiting for input files: %s", input_files_str);
-            strncpy(job->status_reason, held_reason, sizeof(job->status_reason) - 1);
-            db_update_status_reason(job->id, held_reason);
-            store_init_job_dirs(job->id);
-        } else {
-            queue_push(scheduler_queue(), job);
-        }
-
-        strncpy(job_ids[idx], job->id, sizeof(job_ids[idx]) - 1);
-        /* Tag job with workflow batch ID */
-        strncpy(job->workflow_id, wf_batch_id, sizeof(job->workflow_id) - 1);
-        db_update_workflow_id(job->id, wf_batch_id);
-        created_jobs[created] = job;
-        created++;
         idx++;
     }
 
-    /* Build response */
-    cJSON *resp = cJSON_CreateObject();
-    cJSON *jname = cJSON_GetObjectItemCaseSensitive(req, "name");
-    if (cJSON_IsString(jname))
-        cJSON_AddStringToObject(resp, "name", jname->valuestring);
-    cJSON_AddStringToObject(resp, "workflow_id", wf_batch_id);
-    cJSON *arr = cJSON_AddArrayToObject(resp, "jobs");
-    for (int i = 0; i < created; i++) {
-        cJSON_AddItemToArray(arr, job_to_json(created_jobs[i]));
-        /* Free held jobs; queued ones are owned by the queue */
-        if (created_jobs[i]->status == JOB_STATUS_HELD)
-            job_free(created_jobs[i]);
+    for (int i = 0; i < created; i++) response_jobs[i] = *created_jobs[i];
+    if (db_commit() != 0) {
+        workflow_discard_jobs(created_jobs, created);
+        free(response_jobs);
+        cJSON_Delete(req);
+        http_error(c, 500, "Failed to commit workflow");
+        return;
     }
 
-    cJSON_Delete(req);
-    char *s = cJSON_PrintUnformatted(resp);
-    http_json_reply(c, 201, s);
-    free(s);
+    for (int i = 0; i < created; i++) {
+        if (created_jobs[i]->status == JOB_STATUS_HELD) {
+            job_free(created_jobs[i]);
+        } else if (queue_push(scheduler_queue(), created_jobs[i]) != 0) {
+            job_set_status_r(created_jobs[i], JOB_STATUS_FAILED, "Scheduler queue unavailable");
+            response_jobs[i] = *created_jobs[i];
+            job_free(created_jobs[i]);
+        }
+        created_jobs[i] = NULL;
+    }
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON *arr = resp ? cJSON_AddArrayToObject(resp, "jobs") : NULL;
+    if (!resp || !arr) {
+        cJSON_Delete(resp);
+        free(response_jobs);
+        cJSON_Delete(req);
+        http_error(c, 500, "Out of memory while building workflow response");
+        return;
+    }
+    cJSON *jname = cJSON_GetObjectItemCaseSensitive(req, "name");
+    if (cJSON_IsString(jname)) cJSON_AddStringToObject(resp, "name", jname->valuestring);
+    cJSON_AddStringToObject(resp, "workflow_id", wf_batch_id);
+    for (int i = 0; i < created; i++)
+        cJSON_AddItemToArray(arr, job_to_json(&response_jobs[i]));
+
+    char *serialized = cJSON_PrintUnformatted(resp);
+    if (serialized) {
+        http_json_reply(c, 201, serialized);
+        free(serialized);
+    } else {
+        http_error(c, 500, "Out of memory while serializing workflow response");
+    }
     cJSON_Delete(resp);
+    free(response_jobs);
+    cJSON_Delete(req);
     log_info("routes", "Workflow submitted: %d steps by user %s", created, auth_user_id);
+    return;
+
+workflow_error:
+    free(app_env_json);
+    db_rollback();
+    workflow_discard_jobs(created_jobs, created);
+    free(response_jobs);
+    cJSON_Delete(req);
+    http_error(c, error_status, error_message[0] ? error_message : "Workflow submission failed");
 }
 
 static void list_jobs(struct mg_connection *c, struct mg_http_message *hm,
                       const char *auth_user_id, const char *auth_role)
 {
-    (void)hm;
     int is_admin = (strcmp(auth_role, "admin") == 0);
-    Job *jobs = (Job *)malloc(256 * sizeof(Job));
-    if (!jobs) { http_error(c, 500, "Out of memory"); return; }
-    int count = db_list_jobs(jobs, 256);
+    int limit = 100;
+    int offset = 0;
+    int status = -1;
+    char value[128] = {0};
+    char user_filter[128] = {0};
+    char app_filter[128] = {0};
+
+    if (parse_query_int(hm, "limit", 100, 1, 500, &limit) != 0 ||
+        parse_query_int(hm, "offset", 0, 0, 100000000, &offset) != 0) {
+        http_error(c, 400, "Invalid pagination parameters");
+        return;
+    }
+    if (mg_http_get_var(&hm->query, "status", value, sizeof(value)) > 0) {
+        status = job_status_from_text(value);
+        if (status == -2) {
+            http_error(c, 400, "Invalid job status filter");
+            return;
+        }
+    }
+    if (mg_http_get_var(&hm->query, "app_id", app_filter, sizeof(app_filter)) > 0 &&
+        !safe_cli_name(app_filter)) {
+        http_error(c, 400, "Invalid app_id filter");
+        return;
+    }
+    if (is_admin &&
+        mg_http_get_var(&hm->query, "user_id", user_filter, sizeof(user_filter)) > 0 &&
+        !safe_cli_name(user_filter)) {
+        http_error(c, 400, "Invalid user_id filter");
+        return;
+    }
+    const char *owner_filter = is_admin ? user_filter : auth_user_id;
+    Job *jobs = NULL;
+    int count = db_query_jobs(owner_filter, status, app_filter, limit, offset, &jobs);
+    if (count < 0) { http_error(c, 500, "Failed to query jobs"); return; }
     cJSON *arr = cJSON_CreateArray();
+    if (!arr) { free(jobs); http_error(c, 500, "Out of memory"); return; }
     for (int i = 0; i < count; i++) {
-        if (!is_admin &&
-            strcmp(jobs[i].user_id, auth_user_id) != 0)
-            continue;
         cJSON *obj = job_to_json(&jobs[i]);
         cJSON_AddItemToArray(arr, obj);
     }
@@ -1374,8 +2224,13 @@ static void cancel_job(struct mg_connection *c, struct mg_http_message *hm,
         job_free(job);
         return;
     }
-    job_set_status_r(job, JOB_STATUS_CANCELLED, "Cancelled by user");
-    alloc_release(job_id);
+    job_free(job);
+    if (scheduler_cancel_job(job_id, "Cancelled by user") != 0) {
+        http_error(c, 409, "Job could not be cancelled");
+        return;
+    }
+    job = db_get_job(job_id);
+    if (!job) { http_error(c, 404, "Job not found"); return; }
     cJSON *resp = job_to_json(job);
     char *s = cJSON_PrintUnformatted(resp);
     http_json_reply(c, 200, s);
@@ -1425,6 +2280,7 @@ static void check_and_auto_release(const char *job_id)
     char *tok = strtok(files_copy, ",");
     while (tok) {
         while (*tok == ' ') tok++;
+        if (!transfer_valid_filename(tok)) { all_present = 0; break; }
         char path[768];
 #ifdef _WIN32
         snprintf(path, sizeof(path), "%s\\%s", input_dir, tok);
@@ -1446,6 +2302,13 @@ static void check_and_auto_release(const char *job_id)
     }
 }
 
+static int decode_filename_segment(const char *encoded, char *decoded, size_t decoded_len)
+{
+    int length = mg_url_decode(encoded, strlen(encoded), decoded, decoded_len, 0);
+    return length >= 0 && (size_t)length == strlen(decoded) &&
+           transfer_valid_filename(decoded);
+}
+
 static void upload_input(struct mg_connection *c, struct mg_http_message *hm,
                           const char *job_id, const char *filename)
 {
@@ -1454,7 +2317,12 @@ static void upload_input(struct mg_connection *c, struct mg_http_message *hm,
         http_error(c, 413, "Upload too large (max 512 MB)");
         return;
     }
-    long written = upload_handle(job_id, filename,
+    char decoded_filename[256];
+    if (!decode_filename_segment(filename, decoded_filename, sizeof(decoded_filename))) {
+        http_error(c, 400, "Invalid filename");
+        return;
+    }
+    long written = upload_handle(job_id, decoded_filename,
                                  hm->body.buf, (long)hm->body.len);
     if (written < 0) { http_error(c, 500, "Upload failed"); return; }
     char buf[64];
@@ -1466,7 +2334,9 @@ static void upload_input(struct mg_connection *c, struct mg_http_message *hm,
 static void download_output(struct mg_connection *c, struct mg_http_message *hm,
                              const char *job_id, const char *filename)
 {
-    if (download_handle(c, hm, job_id, filename) != 0)
+    char decoded_filename[256];
+    if (!decode_filename_segment(filename, decoded_filename, sizeof(decoded_filename)) ||
+        download_handle(c, hm, job_id, decoded_filename) != 0)
         http_error(c, 404, "Output file not found");
 }
 
@@ -1534,11 +2404,14 @@ static void get_job_log(struct mg_connection *c, struct mg_http_message *hm,
     long sz = ftell(f);
     rewind(f);
 
+    char headers[1536] = {0};
+    http_build_headers(headers, sizeof(headers), "text/plain; charset=utf-8");
+
     mg_printf(c,
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain; charset=utf-8\r\n"
+        "%s"
         "Content-Length: %ld\r\n"
-        "\r\n", sz);
+        "\r\n", headers, sz);
 
     char buf[4096];
     size_t n;
@@ -1667,15 +2540,15 @@ static void list_job_files(struct mg_connection *c, struct mg_http_message *hm,
 static void sse_subscribe(struct mg_connection *c, struct mg_http_message *hm,
                           const char *auth_user_id, const char *auth_role)
 {
-    (void)hm;
     int is_admin = (strcmp(auth_role, "admin") == 0);
+    char headers[1536] = {0};
+    http_build_headers(headers, sizeof(headers), "text/event-stream");
     mg_printf(c,
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
+        "%s"
         "Cache-Control: no-cache\r\n"
         "Connection: keep-alive\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "\r\n");
+        "\r\n", headers);
     httpd_sse_add_user(c, auth_user_id, auth_role);
 
     Job *jobs = (Job *)malloc(256 * sizeof(Job));
@@ -1698,14 +2571,16 @@ static void get_stats(struct mg_connection *c, struct mg_http_message *hm)
     JobStats js; memset(&js, 0, sizeof(js));
     db_job_stats(&js);
 
-    int mcount;
-    Machine *ms = registry_all(&mcount);
+    Machine *ms = NULL;
+    int mcount = registry_snapshot(&ms);
+    if (mcount < 0) { http_error(c, 500, "Failed to snapshot machines"); return; }
     int enabled = 0, cores_total = 0, cores_used = 0, ram_total = 0, ram_used = 0;
     for (int i = 0; i < mcount; i++) {
         if (ms[i].enabled) enabled++;
         cores_total += ms[i].cores_total;  cores_used += ms[i].cores_reserved;
         ram_total   += ms[i].ram_mb_total; ram_used   += ms[i].ram_mb_reserved;
     }
+    free(ms);
 
     cJSON *root = cJSON_CreateObject();
 
@@ -1738,11 +2613,121 @@ static void get_stats(struct mg_connection *c, struct mg_http_message *hm)
     cJSON_Delete(root);
 }
 
+static void get_metrics(struct mg_connection *c, struct mg_http_message *hm)
+{
+    (void)hm;
+    JobStats jobs;
+    memset(&jobs, 0, sizeof(jobs));
+    if (db_job_stats(&jobs) != 0) {
+        http_error(c, 500, "Failed to collect metrics");
+        return;
+    }
+
+    int machine_count = 0;
+    int enabled = 0;
+    int online = 0;
+    int offline = 0;
+    int probing = 0;
+    long long cores_total = 0;
+    long long cores_reserved = 0;
+    long long ram_total = 0;
+    long long ram_reserved = 0;
+    Machine *machines = NULL;
+    machine_count = registry_snapshot(&machines);
+    if (machine_count < 0) {
+        http_error(c, 500, "Failed to snapshot machines");
+        return;
+    }
+    for (int i = 0; i < machine_count; i++) {
+        if (machines[i].enabled) enabled++;
+        if (machines[i].probe_status == MACHINE_ONLINE) online++;
+        else if (machines[i].probe_status == MACHINE_OFFLINE) offline++;
+        else probing++;
+        cores_total += machines[i].cores_total;
+        cores_reserved += machines[i].cores_reserved;
+        ram_total += machines[i].ram_mb_total;
+        ram_reserved += machines[i].ram_mb_reserved;
+    }
+    free(machines);
+
+    char body[4096];
+    int length = snprintf(body, sizeof(body),
+        "# HELP bhc_jobs Jobs by scheduler state.\n"
+        "# TYPE bhc_jobs gauge\n"
+        "bhc_jobs{state=\"held\"} %d\n"
+        "bhc_jobs{state=\"in_queue\"} %d\n"
+        "bhc_jobs{state=\"starting\"} %d\n"
+        "bhc_jobs{state=\"running\"} %d\n"
+        "bhc_jobs{state=\"finished\"} %d\n"
+        "bhc_jobs{state=\"failed\"} %d\n"
+        "bhc_jobs{state=\"cancelled\"} %d\n"
+        "# HELP bhc_machines Machines by availability state.\n"
+        "# TYPE bhc_machines gauge\n"
+        "bhc_machines{state=\"enabled\"} %d\n"
+        "bhc_machines{state=\"online\"} %d\n"
+        "bhc_machines{state=\"offline\"} %d\n"
+        "bhc_machines{state=\"probing\"} %d\n"
+        "# TYPE bhc_accepting_jobs gauge\n"
+        "bhc_accepting_jobs %d\n"
+        "# TYPE bhc_resource_total gauge\n"
+        "bhc_resource_total{resource=\"cores\"} %lld\n"
+        "bhc_resource_total{resource=\"ram_mb\"} %lld\n"
+        "# TYPE bhc_resource_reserved gauge\n"
+        "bhc_resource_reserved{resource=\"cores\"} %lld\n"
+        "bhc_resource_reserved{resource=\"ram_mb\"} %lld\n",
+        jobs.held, jobs.in_queue, jobs.starting, jobs.running,
+        jobs.finished, jobs.failed, jobs.cancelled,
+        enabled, online, offline, probing, s_accepting_jobs,
+        cores_total, ram_total, cores_reserved, ram_reserved);
+    if (length < 0 || length >= (int)sizeof(body)) {
+        http_error(c, 500, "Metrics output too large");
+        return;
+    }
+    char headers[1536] = {0};
+    http_build_headers(headers, sizeof(headers), "text/plain; version=0.0.4; charset=utf-8");
+    mg_http_reply(c, 200, headers, "%s", body);
+}
+
+static void admin_maintenance(struct mg_connection *c, struct mg_http_message *hm,
+                              int update)
+{
+    if (update) {
+        cJSON *request = cJSON_ParseWithLength(hm->body.buf, hm->body.len);
+        cJSON *accepting = request
+                         ? cJSON_GetObjectItemCaseSensitive(request, "accepting_jobs") : NULL;
+        if (!request || !cJSON_IsBool(accepting)) {
+            cJSON_Delete(request);
+            http_error(c, 400, "'accepting_jobs' boolean is required");
+            return;
+        }
+        s_accepting_jobs = cJSON_IsTrue(accepting) ? 1 : 0;
+        cJSON_Delete(request);
+        events_push_persistent("system", s_accepting_jobs ? "drain_disabled" : "drain_enabled",
+                               s_accepting_jobs ? "Job submissions enabled" : "Job submissions paused",
+                               "");
+    }
+
+    JobStats jobs;
+    memset(&jobs, 0, sizeof(jobs));
+    db_job_stats(&jobs);
+    cJSON *response = cJSON_CreateObject();
+    if (!response) { http_error(c, 500, "Out of memory"); return; }
+    cJSON_AddBoolToObject(response, "accepting_jobs", s_accepting_jobs);
+    cJSON_AddNumberToObject(response, "active_jobs", jobs.starting + jobs.running);
+    cJSON_AddNumberToObject(response, "queued_jobs", jobs.in_queue + jobs.held);
+    char *serialized = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (!serialized) { http_error(c, 500, "Out of memory"); return; }
+    http_json_reply(c, 200, serialized);
+    free(serialized);
+}
+
 static void get_resources(struct mg_connection *c, struct mg_http_message *hm)
 {
     (void)hm;
-    int count;
-    Machine *ms = registry_all(&count);
+    Machine *ms = NULL;
+    int count = registry_snapshot(&ms);
+    if (count < 0) { http_error(c, 500, "Failed to snapshot machines"); return; }
     cJSON *arr = cJSON_CreateArray();
     for (int i = 0; i < count; i++) {
         cJSON *m = cJSON_CreateObject();
@@ -1760,6 +2745,7 @@ static void get_resources(struct mg_connection *c, struct mg_http_message *hm)
         cJSON_AddNumberToObject(m, "disk_mb_reserved",ms[i].disk_mb_reserved);
         cJSON_AddItemToArray(arr, m);
     }
+    free(ms);
     char *s = cJSON_PrintUnformatted(arr);
     http_json_reply(c, 200, s);
     free(s);
@@ -1776,28 +2762,31 @@ static void add_machine(struct mg_connection *c, struct mg_http_message *hm)
     if (!req) { http_error(c, 400, "Invalid JSON"); return; }
 
     Machine m; memset(&m, 0, sizeof(m));
-    cJSON *j;
-#define PICK_STR(f,k) if((j=cJSON_GetObjectItemCaseSensitive(req,k)) && cJSON_IsString(j)) strncpy(m.f, j->valuestring, sizeof(m.f)-1)
-#define PICK_INT(f,k) if((j=cJSON_GetObjectItemCaseSensitive(req,k)) && cJSON_IsNumber(j)) m.f = (int)j->valuedouble
-    PICK_STR(id,       "id");
-    PICK_STR(hostname, "hostname");
-    PICK_STR(ip,       "ip");
-    PICK_INT(cores_total,     "cores");
-    PICK_INT(gpu_count_total, "gpu_count");
-    PICK_INT(ram_mb_total,    "ram_mb");
-    PICK_INT(disk_mb_total,   "disk_mb");
+    int invalid = 0;
+    invalid |= copy_optional_string(req, "id", m.id, sizeof(m.id)) < 0;
+    invalid |= copy_optional_string(req, "hostname", m.hostname, sizeof(m.hostname)) < 0;
+    invalid |= copy_optional_string(req, "ip", m.ip, sizeof(m.ip)) < 0;
+    invalid |= json_optional_int(req, "cores", 1, 10000, &m.cores_total) < 0;
+    invalid |= json_optional_int(req, "gpu_count", 0, 1000, &m.gpu_count_total) < 0;
+    invalid |= json_optional_int(req, "ram_mb", 0, 10000000, &m.ram_mb_total) < 0;
+    invalid |= json_optional_int(req, "disk_mb", 0, 10000000, &m.disk_mb_total) < 0;
     m.enabled = 1;
-    j = cJSON_GetObjectItemCaseSensitive(req, "enabled");
+    cJSON *j = cJSON_GetObjectItemCaseSensitive(req, "enabled");
     if (cJSON_IsBool(j)) m.enabled = cJSON_IsTrue(j) ? 1 : 0;
+    else if (j) invalid = 1;
+    m.type = MACHINE_TYPE_STATIC;
+    m.probe_status = MACHINE_PROBING;
 
     cJSON_Delete(req);
 
-    if (!m.id[0]) { http_error(c, 400, "Missing 'id'"); return; }
+    if (invalid || !m.id[0] || m.cores_total < 1) {
+        http_error(c, 400, "Invalid machine parameters");
+        return;
+    }
 
     /* Validate id, hostname, and ip: allow only safe characters */
     static const char *safe_host = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-:";
     const char *fields[] = { m.id, m.hostname, m.ip };
-    const char *fnames[] = { "id", "hostname", "ip" };
     for (int vi = 0; vi < 3; vi++) {
         if (!fields[vi][0]) continue;
         for (const char *vp = fields[vi]; *vp; vp++) {
@@ -1808,7 +2797,10 @@ static void add_machine(struct mg_connection *c, struct mg_http_message *hm)
         }
     }
 
-    registry_upsert(&m);
+    if (registry_upsert(&m) != 0) {
+        http_error(c, 409, "Machine registry is full or machine is invalid");
+        return;
+    }
     http_json_reply(c, 201, "{\"ok\":true}");
 }
 
@@ -1816,7 +2808,12 @@ static void remove_machine(struct mg_connection *c, struct mg_http_message *hm,
                             const char *machine_id)
 {
     (void)hm;
-    if (registry_remove(machine_id) != 0) {
+    int result = registry_remove(machine_id);
+    if (result == -2) {
+        http_error(c, 409, "Machine still has reserved resources");
+        return;
+    }
+    if (result != 0) {
         http_error(c, 404, "Machine not found");
         return;
     }
@@ -1942,8 +2939,10 @@ static void list_keys(struct mg_connection *c, struct mg_http_message *hm)
                      ? keys[i].key_hash + strlen(keys[i].key_hash) - 4
                      : keys[i].key_hash);
         cJSON_AddStringToObject(obj, "key_hash_masked", masked);
+        cJSON_AddStringToObject(obj, "key_hash",   keys[i].key_hash);
         cJSON_AddStringToObject(obj, "label",      keys[i].label);
         cJSON_AddStringToObject(obj, "role",       keys[i].role);
+        cJSON_AddStringToObject(obj, "user_id",    keys[i].user_id);
         cJSON_AddNumberToObject(obj, "created_at", (double)keys[i].created_at);
         cJSON_AddNumberToObject(obj, "expires_at", (double)keys[i].expires_at);
         cJSON_AddBoolToObject  (obj, "revoked",    keys[i].revoked);
@@ -1965,20 +2964,75 @@ static void create_key(struct mg_connection *c, struct mg_http_message *hm)
     cJSON *req = cJSON_Parse(body);
     if (!req) { http_error(c, 400, "Invalid JSON"); return; }
 
-    const char *label = "default";
-    const char *role  = "user";
-    const char *user_id = "";
+    char label[128] = "default";
+    char role[16] = "user";
+    char user_id[128] = {0};
     time_t expires_at = 0;
 
     cJSON *j;
     j = cJSON_GetObjectItemCaseSensitive(req, "label");
-    if (cJSON_IsString(j)) label = j->valuestring;
+    if (j && !cJSON_IsString(j)) {
+        cJSON_Delete(req);
+        http_error(c, 400, "label must be a string");
+        return;
+    }
+    if (cJSON_IsString(j)) {
+        if (!j->valuestring[0] || strlen(j->valuestring) >= sizeof(label)) {
+            cJSON_Delete(req);
+            http_error(c, 400, "label must contain 1-127 characters");
+            return;
+        }
+        for (const unsigned char *p = (const unsigned char *)j->valuestring; *p; p++) {
+            if (*p < 0x20 || *p == 0x7f) {
+                cJSON_Delete(req);
+                http_error(c, 400, "label contains control characters");
+                return;
+            }
+        }
+        strncpy(label, j->valuestring, sizeof(label) - 1);
+    }
     j = cJSON_GetObjectItemCaseSensitive(req, "role");
-    if (cJSON_IsString(j)) role = j->valuestring;
+    if (j && !cJSON_IsString(j)) {
+        cJSON_Delete(req);
+        http_error(c, 400, "role must be a string");
+        return;
+    }
+    if (cJSON_IsString(j)) {
+        if (strlen(j->valuestring) >= sizeof(role)) {
+            cJSON_Delete(req);
+            http_error(c, 400, "role is too long");
+            return;
+        }
+        strncpy(role, j->valuestring, sizeof(role) - 1);
+    }
     j = cJSON_GetObjectItemCaseSensitive(req, "user_id");
-    if (cJSON_IsString(j)) user_id = j->valuestring;
+    if (j && !cJSON_IsString(j)) {
+        cJSON_Delete(req);
+        http_error(c, 400, "user_id must be a string");
+        return;
+    }
+    if (cJSON_IsString(j)) {
+        if (strlen(j->valuestring) >= sizeof(user_id)) {
+            cJSON_Delete(req);
+            http_error(c, 400, "user_id is too long");
+            return;
+        }
+        strncpy(user_id, j->valuestring, sizeof(user_id) - 1);
+    }
     j = cJSON_GetObjectItemCaseSensitive(req, "expires_at");
+    if (j && (!cJSON_IsNumber(j) || !isfinite(j->valuedouble) ||
+              floor(j->valuedouble) != j->valuedouble ||
+              j->valuedouble < 0 || j->valuedouble > 4102444800.0)) {
+        cJSON_Delete(req);
+        http_error(c, 400, "expires_at must be a valid Unix timestamp");
+        return;
+    }
     if (cJSON_IsNumber(j)) expires_at = (time_t)j->valuedouble;
+    if (expires_at != 0 && expires_at <= time(NULL)) {
+        cJSON_Delete(req);
+        http_error(c, 400, "expires_at must be in the future");
+        return;
+    }
 
     /* Validate role */
     if (strcmp(role, "admin") != 0 && strcmp(role, "user") != 0) {
@@ -1986,14 +3040,33 @@ static void create_key(struct mg_connection *c, struct mg_http_message *hm)
         http_error(c, 400, "role must be 'admin' or 'user'");
         return;
     }
+    if ((user_id[0] && !safe_cli_name(user_id)) ||
+        (strcmp(role, "user") == 0 && !user_id[0])) {
+        cJSON_Delete(req);
+        http_error(c, 400, "A user key requires a valid user_id");
+        return;
+    }
+    if (user_id[0]) {
+        UserRecord user;
+        if (db_get_user(user_id, &user) != 0 || !user.enabled) {
+            cJSON_Delete(req);
+            http_error(c, 400, "user_id does not reference an enabled user");
+            return;
+        }
+    }
 
     /* Generate cryptographic random key */
-    unsigned char raw[32];
+    unsigned char raw[32] = {0};
 #ifdef _WIN32
     {
-        HCRYPTPROV hprov;
-        CryptAcquireContextA(&hprov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT);
-        CryptGenRandom(hprov, sizeof(raw), raw);
+        HCRYPTPROV hprov = 0;
+        if (!CryptAcquireContextA(&hprov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT) ||
+            !CryptGenRandom(hprov, sizeof(raw), raw)) {
+            if (hprov) CryptReleaseContext(hprov, 0);
+            cJSON_Delete(req);
+            http_error(c, 500, "Cannot generate random key");
+            return;
+        }
         CryptReleaseContext(hprov, 0);
     }
 #else
@@ -2011,7 +3084,6 @@ static void create_key(struct mg_connection *c, struct mg_http_message *hm)
     char raw_hex[65] = {0};
     for (int i = 0; i < 32; i++) sprintf(raw_hex + i*2, "%02x", raw[i]);
 
-    extern void auth_hash_key(const char *raw_key, char *out_hex_65);
     char hash[65];
     auth_hash_key(raw_hex, hash);
 
@@ -2024,12 +3096,18 @@ static void create_key(struct mg_connection *c, struct mg_http_message *hm)
     }
 
     cJSON *resp = cJSON_CreateObject();
+    if (!resp) { http_error(c, 500, "Out of memory"); return; }
     cJSON_AddStringToObject(resp, "api_key", raw_hex);
     cJSON_AddStringToObject(resp, "label",   label);
     cJSON_AddStringToObject(resp, "role",    role);
     cJSON_AddStringToObject(resp, "user_id", user_id);
     cJSON_AddNumberToObject(resp, "expires_at", (double)expires_at);
     char *s = cJSON_PrintUnformatted(resp);
+    if (!s) {
+        cJSON_Delete(resp);
+        http_error(c, 500, "Out of memory");
+        return;
+    }
     http_json_reply(c, 201, s);
     free(s);
     cJSON_Delete(resp);
@@ -2046,15 +3124,29 @@ static void revoke_key(struct mg_connection *c, struct mg_http_message *hm)
     if (!req) { http_error(c, 400, "Invalid JSON"); return; }
 
     cJSON *jkey = cJSON_GetObjectItemCaseSensitive(req, "api_key");
-    if (!cJSON_IsString(jkey) || !jkey->valuestring[0]) {
+    cJSON *jhash = cJSON_GetObjectItemCaseSensitive(req, "key_hash");
+    cJSON *identifier = cJSON_IsString(jhash) ? jhash : jkey;
+    if (!cJSON_IsString(identifier) || strlen(identifier->valuestring) != 64) {
         cJSON_Delete(req);
-        http_error(c, 400, "Missing 'api_key' field");
+        http_error(c, 400, "api_key or key_hash must contain 64 hexadecimal characters");
         return;
+    }
+    for (const unsigned char *p = (const unsigned char *)identifier->valuestring; *p; p++) {
+        if (!isxdigit(*p)) {
+            cJSON_Delete(req);
+            http_error(c, 400, "api_key or key_hash must contain 64 hexadecimal characters");
+            return;
+        }
     }
 
     extern void auth_hash_key(const char *raw_key, char *out_hex_65);
     char hash[65];
-    auth_hash_key(jkey->valuestring, hash);
+    if (cJSON_IsString(jhash)) {
+        strncpy(hash, jhash->valuestring, sizeof(hash) - 1);
+        hash[sizeof(hash) - 1] = '\0';
+    } else {
+        auth_hash_key(jkey->valuestring, hash);
+    }
     cJSON_Delete(req);
 
     int rc = db_revoke_api_key(hash);
@@ -2150,6 +3242,30 @@ static void create_users(struct mg_connection *c, struct mg_http_message *hm)
             failed++;
             continue;
         }
+        if (!safe_cli_name(juid->valuestring)) {
+            cJSON *r = cJSON_CreateObject();
+            cJSON_AddStringToObject(r, "user_id", juid->valuestring);
+            cJSON_AddStringToObject(r, "error", "user_id must contain only letters, digits, '_' or '-'");
+            cJSON_AddItemToArray(results, r);
+            failed++;
+            continue;
+        }
+
+        char password_hash[AUTH_PASSWORD_HASH_LEN] = {0};
+        int has_password = 0;
+        cJSON *jpwd = cJSON_GetObjectItemCaseSensitive(item, "password");
+        if (jpwd && (!cJSON_IsString(jpwd) || strlen(jpwd->valuestring) < 12 ||
+                     strlen(jpwd->valuestring) > 128 ||
+                     auth_hash_password(jpwd->valuestring, password_hash) != 0)) {
+            cJSON *r = cJSON_CreateObject();
+            cJSON_AddStringToObject(r, "user_id", juid->valuestring);
+            cJSON_AddStringToObject(r, "error", "password must contain 12-128 characters");
+            cJSON_AddItemToArray(results, r);
+            failed++;
+            continue;
+        }
+        if (cJSON_IsString(jpwd)) has_password = 1;
+
         UserRecord u;
         memset(&u, 0, sizeof(u));
         strncpy(u.user_id, juid->valuestring, sizeof(u.user_id)-1);
@@ -2164,12 +3280,14 @@ static void create_users(struct mg_connection *c, struct mg_http_message *hm)
         if (cJSON_IsBool(j)) u.enabled = cJSON_IsTrue(j) ? 1 : 0;
 
         if (db_create_user(&u) == 0) {
-            /* Set password if provided */
-            cJSON *jpwd = cJSON_GetObjectItemCaseSensitive(item, "password");
-            if (cJSON_IsString(jpwd) && jpwd->valuestring[0]) {
-                char pwd_hash[98];
-                auth_hash_password(jpwd->valuestring, pwd_hash);
-                db_set_user_password(u.user_id, pwd_hash);
+            if (has_password && db_set_user_password(u.user_id, password_hash) != 0) {
+                db_delete_user(u.user_id);
+                cJSON *r = cJSON_CreateObject();
+                cJSON_AddStringToObject(r, "user_id", u.user_id);
+                cJSON_AddStringToObject(r, "error", "failed to store password");
+                cJSON_AddItemToArray(results, r);
+                failed++;
+                continue;
             }
             /* Re-read to get created_at */
             UserRecord saved;
@@ -2283,6 +3401,7 @@ static void delete_user(struct mg_connection *c, struct mg_http_message *hm)
 
 static void apps_dir_path(char *buf, int len)
 {
+    if (len <= 0) return;
     if (g_config.apps_dir[0] == '/' || g_config.apps_dir[0] == '\\'
         || (g_config.apps_dir[0] && g_config.apps_dir[1] == ':')) {
         strncpy(buf, g_config.apps_dir, len - 1);
@@ -2291,6 +3410,14 @@ static void apps_dir_path(char *buf, int len)
         exe_relative_path(g_config.apps_dir, prefix, sizeof(prefix));
         strncpy(buf, prefix, len - 1);
     }
+    buf[len - 1] = '\0';
+}
+
+static cJSON *app_for_client(cJSON *app)
+{
+    cJSON *copy = cJSON_Duplicate(app, 1);
+    if (copy) cJSON_DeleteItemFromObjectCaseSensitive(copy, "env");
+    return copy;
 }
 
 static void list_apps(struct mg_connection *c, struct mg_http_message *hm)
@@ -2299,6 +3426,7 @@ static void list_apps(struct mg_connection *c, struct mg_http_message *hm)
     char dir[512]; apps_dir_path(dir, sizeof(dir));
 
     cJSON *arr = cJSON_CreateArray();
+    if (!arr) { http_error(c, 500, "Out of memory"); return; }
 #ifdef _WIN32
     {
         char pattern[520];
@@ -2307,18 +3435,15 @@ static void list_apps(struct mg_connection *c, struct mg_http_message *hm)
         HANDLE h = FindFirstFileA(pattern, &fd);
         if (h != INVALID_HANDLE_VALUE) {
             do {
-                char fpath[768];
-                _snprintf(fpath, sizeof(fpath), "%s\\%s", dir, fd.cFileName);
-                FILE *f = fopen(fpath, "rb");
-                if (f) {
-                    fseek(f, 0, SEEK_END); long sz = ftell(f); rewind(f);
-                    char *data = (char *)malloc(sz + 1);
-                    if (data) { fread(data, 1, sz, f); data[sz] = '\0';
-                        cJSON *obj = cJSON_Parse(data);
-                        if (obj) cJSON_AddItemToArray(arr, obj);
-                        free(data);
-                    }
-                    fclose(f);
+                size_t name_len = strlen(fd.cFileName);
+                if (name_len > 5 && name_len - 5 <= 64) {
+                    char app_id[65] = {0};
+                    memcpy(app_id, fd.cFileName, name_len - 5);
+                    char error[256] = {0};
+                    cJSON *app = load_app_definition(app_id, error, sizeof(error));
+                    cJSON *obj = app ? app_for_client(app) : NULL;
+                    cJSON_Delete(app);
+                    if (obj) cJSON_AddItemToArray(arr, obj);
                 }
             } while (FindNextFileA(h, &fd));
             FindClose(h);
@@ -2332,18 +3457,15 @@ static void list_apps(struct mg_connection *c, struct mg_http_message *hm)
             while ((ent = readdir(d))) {
                 const char *ext = strrchr(ent->d_name, '.');
                 if (!ext || strcmp(ext, ".json") != 0) continue;
-                char fpath[768];
-                snprintf(fpath, sizeof(fpath), "%s/%s", dir, ent->d_name);
-                FILE *f = fopen(fpath, "rb");
-                if (f) {
-                    fseek(f, 0, SEEK_END); long sz = ftell(f); rewind(f);
-                    char *data = (char *)malloc(sz + 1);
-                    if (data) { fread(data, 1, sz, f); data[sz] = '\0';
-                        cJSON *obj = cJSON_Parse(data);
-                        if (obj) cJSON_AddItemToArray(arr, obj);
-                        free(data);
-                    }
-                    fclose(f);
+                size_t name_len = strlen(ent->d_name);
+                if (name_len > 5 && name_len - 5 <= 64) {
+                    char app_id[65] = {0};
+                    memcpy(app_id, ent->d_name, name_len - 5);
+                    char error[256] = {0};
+                    cJSON *app = load_app_definition(app_id, error, sizeof(error));
+                    cJSON *obj = app ? app_for_client(app) : NULL;
+                    cJSON_Delete(app);
+                    if (obj) cJSON_AddItemToArray(arr, obj);
                 }
             }
             closedir(d);
@@ -2351,6 +3473,7 @@ static void list_apps(struct mg_connection *c, struct mg_http_message *hm)
     }
 #endif
     char *s = cJSON_PrintUnformatted(arr);
+    if (!s) { cJSON_Delete(arr); http_error(c, 500, "Out of memory"); return; }
     http_json_reply(c, 200, s);
     free(s);
     cJSON_Delete(arr);
@@ -2360,50 +3483,34 @@ static void get_app(struct mg_connection *c, struct mg_http_message *hm,
                     const char *app_id)
 {
     (void)hm;
-    /* Validate app_id: alphanumeric + underscore + dash only */
-    for (const char *p = app_id; *p; p++) {
-        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')) {
-            http_error(c, 400, "Invalid app_id"); return;
-        }
-    }
-    char dir[512]; apps_dir_path(dir, sizeof(dir));
-    char fpath[768];
-#ifdef _WIN32
-    _snprintf(fpath, sizeof(fpath), "%s\\%s.json", dir, app_id);
-#else
-    snprintf(fpath, sizeof(fpath), "%s/%s.json", dir, app_id);
-#endif
-    FILE *f = fopen(fpath, "rb");
-    if (!f) { http_error(c, 404, "App not found"); return; }
-    fseek(f, 0, SEEK_END); long sz = ftell(f); rewind(f);
-    char *data = (char *)malloc(sz + 1);
-    if (!data) { fclose(f); http_error(c, 500, "Out of memory"); return; }
-    fread(data, 1, sz, f); fclose(f); data[sz] = '\0';
+    if (!safe_cli_name(app_id)) { http_error(c, 400, "Invalid app_id"); return; }
+    char error[256] = {0};
+    cJSON *app = load_app_definition(app_id, error, sizeof(error));
+    if (!app) { http_error(c, 404, error[0] ? error : "App not found"); return; }
+    cJSON *public_app = app_for_client(app);
+    cJSON_Delete(app);
+    char *data = public_app ? cJSON_PrintUnformatted(public_app) : NULL;
+    cJSON_Delete(public_app);
+    if (!data) { http_error(c, 500, "Out of memory"); return; }
     http_json_reply(c, 200, data);
     free(data);
 }
 
 static void upsert_app(struct mg_connection *c, struct mg_http_message *hm)
 {
-    char body[8192] = {0};
-    size_t blen = hm->body.len < sizeof(body)-1 ? hm->body.len : sizeof(body)-1;
-    memcpy(body, hm->body.buf, blen);
-
-    cJSON *req = cJSON_Parse(body);
+    if (hm->body.len == 0 || hm->body.len > 65536) {
+        http_error(c, 413, "App definition must not exceed 64 KiB");
+        return;
+    }
+    cJSON *req = cJSON_ParseWithLength(hm->body.buf, hm->body.len);
     if (!req) { http_error(c, 400, "Invalid JSON"); return; }
-
+    char validation_error[256] = {0};
+    if (validate_app_definition(req, validation_error, sizeof(validation_error)) != 0) {
+        cJSON_Delete(req);
+        http_error(c, 400, validation_error);
+        return;
+    }
     cJSON *jid = cJSON_GetObjectItemCaseSensitive(req, "app_id");
-    if (!cJSON_IsString(jid) || !jid->valuestring[0]) {
-        cJSON_Delete(req); http_error(c, 400, "Missing 'app_id'"); return;
-    }
-    /* Validate app_id */
-    for (const char *p = jid->valuestring; *p; p++) {
-        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')) {
-            cJSON_Delete(req); http_error(c, 400, "Invalid app_id characters"); return;
-        }
-    }
 
     char dir[512]; apps_dir_path(dir, sizeof(dir));
     /* Ensure directory exists */
@@ -2422,12 +3529,35 @@ static void upsert_app(struct mg_connection *c, struct mg_http_message *hm)
     char *pretty = cJSON_Print(req);
     cJSON_Delete(req);
     if (!pretty) { http_error(c, 500, "JSON format error"); return; }
+    if (strlen(pretty) > 65536) {
+        free(pretty);
+        http_error(c, 413, "Formatted app definition exceeds 64 KiB");
+        return;
+    }
 
-    FILE *f = fopen(fpath, "wb");
+    char temp_path[800];
+    snprintf(temp_path, sizeof(temp_path), "%s.tmp", fpath);
+    FILE *f = fopen(temp_path, "wb");
     if (!f) { free(pretty); http_error(c, 500, "Cannot write app file"); return; }
-    fwrite(pretty, 1, strlen(pretty), f);
-    fclose(f);
+    int write_failed = fwrite(pretty, 1, strlen(pretty), f) != strlen(pretty);
+    if (fflush(f) != 0) write_failed = 1;
+    if (fclose(f) != 0) write_failed = 1;
     free(pretty);
+    if (write_failed) {
+        remove(temp_path);
+        http_error(c, 500, "Cannot write app file");
+        return;
+    }
+#ifdef _WIN32
+    if (!MoveFileExA(temp_path, fpath,
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+#else
+    if (rename(temp_path, fpath) != 0) {
+#endif
+        remove(temp_path);
+        http_error(c, 500, "Cannot replace app file");
+        return;
+    }
 
     http_json_reply(c, 200, "{\"ok\":true}");
     log_info("routes", "App definition saved: %s", fpath);
@@ -2437,12 +3567,7 @@ static void delete_app(struct mg_connection *c, struct mg_http_message *hm,
                        const char *app_id)
 {
     (void)hm;
-    for (const char *p = app_id; *p; p++) {
-        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')) {
-            http_error(c, 400, "Invalid app_id"); return;
-        }
-    }
+    if (!safe_cli_name(app_id)) { http_error(c, 400, "Invalid app_id"); return; }
     char dir[512]; apps_dir_path(dir, sizeof(dir));
     char fpath[768];
 #ifdef _WIN32
@@ -2616,8 +3741,9 @@ static void admin_report_machines(struct mg_connection *c, struct mg_http_messag
 static void admin_machines_status(struct mg_connection *c, struct mg_http_message *hm)
 {
     (void)hm;
-    int count = 0;
-    Machine *machines = registry_all(&count);
+    Machine *machines = NULL;
+    int count = registry_snapshot(&machines);
+    if (count < 0) { http_error(c, 500, "Failed to snapshot machines"); return; }
 
     cJSON *arr = cJSON_CreateArray();
     for (int i = 0; i < count; i++) {
@@ -2643,6 +3769,7 @@ static void admin_machines_status(struct mg_connection *c, struct mg_http_messag
         cJSON_AddNumberToObject(o, "ram_mb_reserved", m->ram_mb_reserved);
         cJSON_AddItemToArray(arr, o);
     }
+    free(machines);
     char *s = cJSON_PrintUnformatted(arr);
     http_json_reply(c, 200, s);
     free(s); cJSON_Delete(arr);
@@ -2657,37 +3784,40 @@ static void admin_cloud_provision(struct mg_connection *c, struct mg_http_messag
     CloudMachineSpec spec;
     memset(&spec, 0, sizeof(spec));
 
-    cJSON *j;
-    j = cJSON_GetObjectItemCaseSensitive(body, "provider");
-    if (cJSON_IsString(j)) strncpy(spec.provider, j->valuestring, sizeof(spec.provider)-1);
-    j = cJSON_GetObjectItemCaseSensitive(body, "instance_type");
-    if (cJSON_IsString(j)) strncpy(spec.instance_type, j->valuestring, sizeof(spec.instance_type)-1);
-    j = cJSON_GetObjectItemCaseSensitive(body, "region");
-    if (cJSON_IsString(j)) strncpy(spec.region, j->valuestring, sizeof(spec.region)-1);
-    j = cJSON_GetObjectItemCaseSensitive(body, "image_id");
-    if (cJSON_IsString(j)) strncpy(spec.image_id, j->valuestring, sizeof(spec.image_id)-1);
-    j = cJSON_GetObjectItemCaseSensitive(body, "cores");
-    if (cJSON_IsNumber(j)) spec.cores = (int)j->valuedouble;
-    j = cJSON_GetObjectItemCaseSensitive(body, "gpu_count");
-    if (cJSON_IsNumber(j)) spec.gpu_count = (int)j->valuedouble;
-    j = cJSON_GetObjectItemCaseSensitive(body, "ram_mb");
-    if (cJSON_IsNumber(j)) spec.ram_mb = (int)j->valuedouble;
-    j = cJSON_GetObjectItemCaseSensitive(body, "disk_mb");
-    if (cJSON_IsNumber(j)) spec.disk_mb = (int)j->valuedouble;
-    j = cJSON_GetObjectItemCaseSensitive(body, "tags");
-    if (cJSON_IsString(j)) strncpy(spec.tags, j->valuestring, sizeof(spec.tags)-1);
-
-    /* Flexible minimums */
-    j = cJSON_GetObjectItemCaseSensitive(body, "cores_min");
-    if (cJSON_IsNumber(j)) spec.cores_min = (int)j->valuedouble;
-    j = cJSON_GetObjectItemCaseSensitive(body, "ram_mb_min");
-    if (cJSON_IsNumber(j)) spec.ram_mb_min = (int)j->valuedouble;
-    j = cJSON_GetObjectItemCaseSensitive(body, "disk_mb_min");
-    if (cJSON_IsNumber(j)) spec.disk_mb_min = (int)j->valuedouble;
-
+    int invalid = 0;
+    invalid |= copy_optional_string(body, "provider", spec.provider, sizeof(spec.provider)) < 0;
+    invalid |= copy_optional_string(body, "instance_type", spec.instance_type, sizeof(spec.instance_type)) < 0;
+    invalid |= copy_optional_string(body, "region", spec.region, sizeof(spec.region)) < 0;
+    invalid |= copy_optional_string(body, "image_id", spec.image_id, sizeof(spec.image_id)) < 0;
+    invalid |= copy_optional_string(body, "tags", spec.tags, sizeof(spec.tags)) < 0;
+    invalid |= json_optional_int(body, "cores", 0, 10000, &spec.cores) < 0;
+    invalid |= json_optional_int(body, "gpu_count", 0, 1000, &spec.gpu_count) < 0;
+    invalid |= json_optional_int(body, "ram_mb", 0, 10000000, &spec.ram_mb) < 0;
+    invalid |= json_optional_int(body, "disk_mb", 0, 10000000, &spec.disk_mb) < 0;
+    invalid |= json_optional_int(body, "cores_min", 0, 10000, &spec.cores_min) < 0;
+    invalid |= json_optional_int(body, "ram_mb_min", 0, 10000000, &spec.ram_mb_min) < 0;
+    invalid |= json_optional_int(body, "disk_mb_min", 0, 10000000, &spec.disk_mb_min) < 0;
     cJSON_Delete(body);
 
-    if (!spec.provider[0]) { http_error(c, 400, "Missing provider"); return; }
+    int provider_valid = strcmp(spec.provider, "aws") == 0 ||
+                         strcmp(spec.provider, "gcp") == 0 ||
+                         strcmp(spec.provider, "azure") == 0;
+    if (invalid || !provider_valid ||
+        (spec.instance_type[0] && !safe_cloud_arg(spec.instance_type)) ||
+        (spec.region[0] && !safe_cloud_arg(spec.region)) ||
+        (spec.image_id[0] && !safe_cloud_arg(spec.image_id)) ||
+        (strcmp(spec.provider, "aws") == 0 && !spec.image_id[0])) {
+        http_error(c, 400, "Invalid cloud provisioning parameters");
+        return;
+    }
+    int effective_cores = spec.cores > 0 ? spec.cores : 2;
+    int effective_ram = spec.ram_mb > 0 ? spec.ram_mb : 4096;
+    int effective_disk = spec.disk_mb > 0 ? spec.disk_mb : 50000;
+    if (spec.cores_min > effective_cores || spec.ram_mb_min > effective_ram ||
+        spec.disk_mb_min > effective_disk) {
+        http_error(c, 400, "Cloud resource minimums cannot exceed totals");
+        return;
+    }
 
     char out_id[128] = {0};
     if (cloud_provision(&spec, out_id, sizeof(out_id)) != 0) {
@@ -2711,15 +3841,30 @@ static void admin_cloud_deprovision(struct mg_connection *c, struct mg_http_mess
     if (!body) { http_error(c, 400, "Invalid JSON"); return; }
 
     char provider[32] = {0}, instance_id[128] = {0};
-    cJSON *j;
-    j = cJSON_GetObjectItemCaseSensitive(body, "provider");
-    if (cJSON_IsString(j)) strncpy(provider, j->valuestring, sizeof(provider)-1);
-    j = cJSON_GetObjectItemCaseSensitive(body, "instance_id");
-    if (cJSON_IsString(j)) strncpy(instance_id, j->valuestring, sizeof(instance_id)-1);
+    int invalid = copy_optional_string(body, "provider", provider, sizeof(provider)) < 0 ||
+                  copy_optional_string(body, "instance_id", instance_id, sizeof(instance_id)) < 0;
     cJSON_Delete(body);
 
-    if (!provider[0] || !instance_id[0]) {
-        http_error(c, 400, "Missing provider or instance_id"); return;
+    int provider_valid = strcmp(provider, "aws") == 0 ||
+                         strcmp(provider, "gcp") == 0 ||
+                         strcmp(provider, "azure") == 0;
+    if (invalid || !provider_valid || !safe_cloud_arg(instance_id)) {
+        http_error(c, 400, "Invalid provider or instance_id"); return;
+    }
+
+    char registry_id[160];
+    snprintf(registry_id, sizeof(registry_id), "cloud-%s", instance_id);
+    Machine registered;
+    if (registry_get_copy(registry_id, &registered) == 0) {
+        if (strcmp(registered.cloud_provider, provider) != 0) {
+            http_error(c, 409, "Cloud provider does not match registered machine");
+            return;
+        }
+        if (registered.cores_reserved > 0 || registered.gpu_count_reserved > 0 ||
+            registered.ram_mb_reserved > 0 || registered.disk_mb_reserved > 0) {
+            http_error(c, 409, "Cloud machine still has reserved resources");
+            return;
+        }
     }
 
     if (cloud_deprovision(provider, instance_id) != 0) {
@@ -2746,15 +3891,19 @@ static void admin_wol(struct mg_connection *c, struct mg_http_message *hm)
 
     if (!machine_id[0]) { http_error(c, 400, "Missing machine_id"); return; }
 
-    Machine *m = registry_get(machine_id);
-    if (!m) { http_error(c, 404, "Machine not found"); return; }
-    if (!m->mac_address[0]) { http_error(c, 400, "Machine has no MAC address configured"); return; }
+    Machine machine;
+    if (registry_get_copy(machine_id, &machine) != 0) {
+        http_error(c, 404, "Machine not found"); return;
+    }
+    if (!machine.mac_address[0]) {
+        http_error(c, 400, "Machine has no MAC address configured"); return;
+    }
 
-    if (wol_send(m->mac_address, broadcast_ip[0] ? broadcast_ip : NULL) != 0) {
+    if (wol_send(machine.mac_address, broadcast_ip[0] ? broadcast_ip : NULL) != 0) {
         http_error(c, 500, "WoL send failed"); return;
     }
 
-    events_push_persistent("machine", "wol", m->id, "");
+    events_push_persistent("machine", "wol", machine.id, "");
     http_json_reply(c, 200, "{\"ok\":true,\"message\":\"WoL packet sent\"}");
 }
 
@@ -2810,13 +3959,32 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
     char seg[5][128] = {{0}};
     for (int i = 0; i < 5; i++) extract_segment(uri, i, seg[i], 128);
 
+    if (g_config.require_https) {
+        struct mg_str *forwarded_proto = mg_http_get_header(hm, "X-Forwarded-Proto");
+        if (!forwarded_proto || forwarded_proto->len != 5 ||
+            memcmp(forwarded_proto->buf, "https", 5) != 0) {
+            http_error(c, 426, "HTTPS required");
+            return;
+        }
+    }
+
     /* ── CORS preflight ────────────────────────────────────────── */
     if (strcmp(method, "OPTIONS") == 0) {
-        mg_http_reply(c, 204,
-            "Access-Control-Allow-Origin: *\r\n"
+        struct mg_str *origin = mg_http_get_header(hm, "Origin");
+        size_t allowed_len = strlen(g_config.cors_allowed_origin);
+        if (!allowed_len || !origin || origin->len != allowed_len ||
+            memcmp(origin->buf, g_config.cors_allowed_origin, allowed_len) != 0) {
+            http_error(c, 403, "Cross-origin request denied");
+            return;
+        }
+        char headers[1792] = {0};
+        http_build_headers(headers, sizeof(headers), "text/plain; charset=utf-8");
+        strncat(headers,
             "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
-            "Access-Control-Allow-Headers: Content-Type, X-API-Key\r\n"
-            "Access-Control-Max-Age: 86400\r\n", "");
+            "Access-Control-Allow-Headers: Content-Type, X-API-Key, Idempotency-Key\r\n"
+            "Access-Control-Max-Age: 86400\r\n",
+            sizeof(headers) - strlen(headers) - 1);
+        mg_http_reply(c, 204, headers, "");
         return;
     }
 
@@ -2865,6 +4033,9 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
 
     /* POST /auth/change-password (authenticated) */
     if (strcmp(seg[0], "auth") == 0) {
+        if (strcmp(method, "GET") == 0 && strcmp(seg[1], "me") == 0) {
+            auth_me(c, auth_user_id, auth_role); return;
+        }
         if (strcmp(method, "POST") == 0 && strcmp(seg[1], "change-password") == 0) {
             auth_change_password(c, hm, auth_user_id); return;
         }
@@ -2886,10 +4057,29 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
         http_error(c, 404, "Not found"); return;
     }
 
+    if (strcmp(seg[0], "admin") == 0 && strcmp(seg[1], "maintenance") == 0) {
+        if (strcmp(method, "GET") == 0) { admin_maintenance(c, hm, 0); return; }
+        if (strcmp(method, "POST") == 0) { admin_maintenance(c, hm, 1); return; }
+        http_error(c, 404, "Not found"); return;
+    }
+
+    if (strcmp(seg[0], "metrics") == 0) {
+        if (strcmp(auth_role, "admin") != 0) {
+            http_error(c, 403, "Forbidden: admin role required");
+            return;
+        }
+        if (strcmp(method, "GET") == 0 && seg[1][0] == '\0') {
+            get_metrics(c, hm);
+            return;
+        }
+        http_error(c, 404, "Not found");
+        return;
+    }
+
     /* /jobs */
     if (strcmp(seg[0], "jobs") == 0) {
         if (strcmp(method, "POST") == 0 && seg[1][0] == '\0') {
-            submit_job(c, hm, auth_user_id); return;
+            submit_job(c, hm, auth_user_id, auth_role); return;
         }
         if (strcmp(method, "GET") == 0 && seg[1][0] == '\0') {
             list_jobs(c, hm, auth_user_id, auth_role); return;
@@ -2906,16 +4096,20 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
             sse_subscribe(c, hm, auth_user_id, auth_role); return;
         }
         if (seg[1][0] != '\0') {
+            if (!safe_cli_name(seg[1])) {
+                http_error(c, 404, "Job not found");
+                return;
+            }
             /* Enforce job ownership for non-admin users */
             if (strcmp(auth_role, "admin") != 0) {
                 Job *_chk = db_get_job(seg[1]);
-                if (_chk && _chk->user_id[0] &&
+                if (!_chk || !_chk->user_id[0] ||
                     strcmp(_chk->user_id, auth_user_id) != 0) {
-                    job_free(_chk);
+                    if (_chk) job_free(_chk);
                     http_error(c, 404, "Job not found");
                     return;
                 }
-                if (_chk) job_free(_chk);
+                job_free(_chk);
             }
             if (strcmp(method, "GET") == 0 && seg[2][0] == '\0') {
                 get_job(c, hm, seg[1]); return;
@@ -2967,7 +4161,7 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
             save_workflow(c, hm, auth_user_id, auth_role); return;
         }
         if (strcmp(method, "POST") == 0 && strcmp(seg[1], "run") == 0 && seg[2][0] == '\0') {
-            submit_workflow(c, hm, auth_user_id); return;
+            submit_workflow(c, hm, auth_user_id, auth_role); return;
         }
         if (strcmp(method, "DELETE") == 0 && seg[1][0] != '\0' && seg[2][0] == '\0') {
             delete_saved_workflow(c, seg[1], auth_user_id, auth_role); return;
