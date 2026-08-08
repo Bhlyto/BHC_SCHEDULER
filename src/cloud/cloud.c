@@ -65,11 +65,12 @@ static int run_command(const char *cmd, char *buf, int buf_len)
 static int is_safe_arg(const char *s)
 {
     if (!s) return 1;
+    if (s[0] == '-') return 0;
     for (const char *p = s; *p; p++) {
         if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
               (*p >= '0' && *p <= '9') || *p == '-' || *p == '_' ||
               *p == '.' || *p == '/' || *p == ':' || *p == ',' ||
-              *p == '=' || *p == ' '))
+              *p == '='))
             return 0;
     }
     return 1;
@@ -139,7 +140,14 @@ static int aws_provision(const CloudMachineSpec *spec, char *out_id, int id_len)
     m.ram_mb_min = spec->ram_mb_min;
     m.disk_mb_min = spec->disk_mb_min;
     m.probe_status = MACHINE_PROBING;
-    registry_upsert(&m);
+    if (registry_upsert(&m) != 0) {
+        char cleanup_cmd[512];
+        snprintf(cleanup_cmd, sizeof(cleanup_cmd),
+            "aws ec2 terminate-instances --instance-ids %s --output json", out_id);
+        run_command(cleanup_cmd, result, sizeof(result));
+        log_error("cloud", "Registry rejected AWS instance %s; termination requested", out_id);
+        return -1;
+    }
 
     /* Copy the machine registry id to out */
     strncpy(out_id, m.id, id_len - 1);
@@ -247,7 +255,14 @@ static int gcp_provision(const CloudMachineSpec *spec, char *out_id, int id_len)
     m.ram_mb_min = spec->ram_mb_min;
     m.disk_mb_min = spec->disk_mb_min;
     m.probe_status = MACHINE_PROBING;
-    registry_upsert(&m);
+    if (registry_upsert(&m) != 0) {
+        char cleanup_cmd[512];
+        snprintf(cleanup_cmd, sizeof(cleanup_cmd),
+            "gcloud compute instances delete %s --quiet", name);
+        run_command(cleanup_cmd, result, sizeof(result));
+        log_error("cloud", "Registry rejected GCP instance %s; deletion requested", name);
+        return -1;
+    }
 
     strncpy(out_id, m.id, id_len - 1);
     log_info("cloud", "GCP instance provisioned: %s", m.id);
@@ -265,9 +280,11 @@ static int gcp_deprovision(const char *instance_id)
     char result[2048] = {0};
     int rc = run_command(cmd, result, sizeof(result));
 
-    char id[128];
-    snprintf(id, sizeof(id), "cloud-%s", instance_id);
-    registry_remove(id);
+    if (rc == 0) {
+        char id[128];
+        snprintf(id, sizeof(id), "cloud-%s", instance_id);
+        registry_remove(id);
+    }
 
     log_info("cloud", "GCP instance deleted: %s (rc=%d)", instance_id, rc);
     return (rc == 0) ? 0 : -1;
@@ -318,7 +335,14 @@ static int azure_provision(const CloudMachineSpec *spec, char *out_id, int id_le
     m.ram_mb_min = spec->ram_mb_min;
     m.disk_mb_min = spec->disk_mb_min;
     m.probe_status = MACHINE_PROBING;
-    registry_upsert(&m);
+    if (registry_upsert(&m) != 0) {
+        char cleanup_cmd[512];
+        snprintf(cleanup_cmd, sizeof(cleanup_cmd),
+            "az vm delete --name %s --resource-group orchestrator --yes --no-wait", name);
+        run_command(cleanup_cmd, result, sizeof(result));
+        log_error("cloud", "Registry rejected Azure VM %s; deletion requested", name);
+        return -1;
+    }
 
     strncpy(out_id, m.id, id_len - 1);
     log_info("cloud", "Azure VM provisioned: %s", m.id);
@@ -337,9 +361,11 @@ static int azure_deprovision(const char *instance_id)
     char result[2048] = {0};
     int rc = run_command(cmd, result, sizeof(result));
 
-    char id[128];
-    snprintf(id, sizeof(id), "cloud-%s", instance_id);
-    registry_remove(id);
+    if (rc == 0) {
+        char id[128];
+        snprintf(id, sizeof(id), "cloud-%s", instance_id);
+        registry_remove(id);
+    }
 
     log_info("cloud", "Azure VM deleted: %s (rc=%d)", instance_id, rc);
     return (rc == 0) ? 0 : -1;

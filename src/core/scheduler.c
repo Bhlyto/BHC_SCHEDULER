@@ -29,20 +29,17 @@ static void trim_local(char *s)
 #ifdef _WIN32
 #  include <windows.h>
 #  define sleep_ms(ms) Sleep(ms)
+static HANDLE s_scheduler_thread = NULL;
 #else
 #  include <unistd.h>
 #  include <pthread.h>
 #  define sleep_ms(ms) usleep((ms) * 1000)
+static pthread_t s_scheduler_thread;
 #endif
 
 static Queue *s_queue    = NULL;
-static int    s_running  = 0;
-#ifdef _WIN32
-static HANDLE s_scheduler_thread = NULL;
-#else
-static pthread_t s_scheduler_thread;
-static int s_scheduler_thread_started = 0;
-#endif
+static volatile int s_running = 0;
+static int s_thread_started = 0;
 
 /* ── Auto-provision rate limiter: track job IDs that already triggered ──── */
 #define AUTO_PROV_MAX 256
@@ -103,20 +100,15 @@ static int count_present_files(const char *input_dir, const char *input_files)
     return present;
 }
 
-static int job_fits_available_resources(const Job *job, void *context)
-{
-    (void)context;
-    return alloc_can_fit(job->req_cores, job->req_gpu,
-                         job->req_ram_mb, job->req_disk_mb);
-}
-
 /* Periodic: release CREATED jobs once their required inputs are ready. */
 static void scheduler_check_held_jobs(void)
 {
-    Job *jobs = (Job *)malloc(256 * sizeof(Job));
-    if (!jobs) return;
-
-    int count = db_list_held_jobs(jobs, 256);
+    Job *jobs = NULL;
+    int count = db_load_jobs_by_status(JOB_STATUS_CREATED, &jobs);
+    if (count <= 0) {
+        free(jobs);
+        return;
+    }
     for (int i = 0; i < count; i++) {
         Job *j = &jobs[i];
 
@@ -170,8 +162,8 @@ static void scheduler_check_held_jobs(void)
                 memset(&dctx, 0, sizeof(dctx));
                 dctx.job_id = j->id;
                 /* compute available cpus across registry */
-                int mcount = 0;
-                Machine *ml = registry_all(&mcount);
+                Machine *ml = NULL;
+                int mcount = registry_snapshot(&ml);
                 uint32_t freecpus = 0;
                 uint32_t freemem = 0;
                 for (int mi = 0; ml && mi < mcount; mi++) {
@@ -183,6 +175,7 @@ static void scheduler_check_held_jobs(void)
                         if (memfree > 0) freemem += (uint32_t)memfree;
                     }
                 }
+                free(ml);
                 dctx.available_cpus = freecpus;
                 dctx.available_mem_mb = freemem;
                 dc_result_t dres;
@@ -284,10 +277,9 @@ static void scheduler_check_held_jobs(void)
 /* ── Periodic: kill jobs that have exceeded their timeout ───────────────── */
 static void scheduler_check_timeouts(void)
 {
-    Job *jobs = (Job *)malloc(256 * sizeof(Job));
-    if (!jobs) return;
-
-    int count = db_list_running_jobs(jobs, 256);
+    Job *jobs = NULL;
+    int count = db_load_jobs_by_status(JOB_STATUS_RUNNING, &jobs);
+    if (count < 0) return;
     time_t now = time(NULL);
 
     for (int i = 0; i < count; i++) {
@@ -307,15 +299,40 @@ static void scheduler_check_timeouts(void)
             char reason[128];
             snprintf(reason, sizeof(reason),
                 "Timed out after %.0f seconds (limit=%d s)", elapsed, limit);
-            j->exit_code = -1;
-            job_set_status_r(j, JOB_STATUS_FAILED, reason);
-            if (!executor_terminate(j->id)) {
-                db_release_allocation(j->id);
+            if (executor_timeout(j->id, reason) != 0) {
+                db_update_job_status(j->id, JOB_STATUS_FAILED, -1, now);
+                db_update_status_reason(j->id, reason);
                 alloc_release(j->id);
+            }
+            /* Auto-deprovision cloud machine if now idle */
+            if (g_config.experimental_features_enabled &&
+                g_config.cloud_auto_deprovision && j->machine_id[0]) {
+                Machine machine;
+                if (registry_get_copy(j->machine_id, &machine) == 0 &&
+                    machine.type == MACHINE_TYPE_CLOUD &&
+                    machine.cores_reserved <= 0 && machine.ram_mb_reserved <= 0) {
+                    log_info("scheduler",
+                        "Auto-deprovisioning idle cloud machine %s after timeout",
+                        machine.id);
+                    cloud_deprovision(machine.cloud_provider, machine.cloud_instance_id);
+                }
             }
         }
     }
     free(jobs);
+}
+
+static void scheduler_dispatch(Job *job)
+{
+    Job *current = db_get_job(job->id);
+    if (!current || current->status != JOB_STATUS_QUEUED) {
+        if (current) job_free(current);
+        alloc_release(job->id);
+        job_free(job);
+        return;
+    }
+    job_free(current);
+    executor_spawn(job);
 }
 
 
@@ -340,11 +357,12 @@ static void *scheduler_thread(void *arg)
             scheduler_check_timeouts();
         }
 
-        /* Prefer the highest-priority job that can run now. If none fits,
-           inspect the queue head so diagnostics and auto-provisioning still run. */
-        Job *job = queue_try_pop_matching(s_queue, job_fits_available_resources, NULL);
-        if (!job) job = queue_try_pop(s_queue);
-        if (!job) continue;
+        /* Scan at most the jobs present at the beginning of this tick so one
+           blocked head cannot starve runnable jobs behind it. */
+        int jobs_to_scan = queue_size(s_queue);
+        for (int scan = 0; scan < jobs_to_scan && s_running; scan++) {
+            Job *job = queue_try_pop(s_queue);
+            if (!job) break;
 
         /* The database is authoritative. A queued object may be stale when a
            cancellation raced with the in-memory queue. */
@@ -393,7 +411,7 @@ static void *scheduler_thread(void *arg)
                         db_insert_event("job", "dispatch", detail,
                                         job->user_id, job->id, job->machine_id);
                     }
-                    executor_spawn(job);
+                    scheduler_dispatch(job);
                     continue;
                 } else {
                     /* Target machine lacks capacity — re-queue */
@@ -497,6 +515,7 @@ static void *scheduler_thread(void *arg)
                     db_update_depends_on(job->id, child->id);
                     db_update_job_status(job->id, JOB_STATUS_CREATED, 0, 0);
                     db_update_status_reason(job->id, "Waiting for presim subjob");
+                    job_free(job);
                     continue; /* don't run decision core yet */
                 } else {
                     log_warn("scheduler", "Failed to create presim child for job %s", job->id);
@@ -504,15 +523,15 @@ static void *scheduler_thread(void *arg)
             }
         }
 
-        /* Ask decision core for strategy / allocation hints */
-        {
+        /* Experimental strategies stay outside the v1 scheduling path. */
+        if (g_config.experimental_features_enabled) {
             dc_context_t dctx;
             memset(&dctx, 0, sizeof(dctx));
             dctx.job_id = job->id;
             /* compute available cpus across registry */
             {
-                int mcount = 0;
-                Machine *ml = registry_all(&mcount);
+                Machine *ml = NULL;
+                int mcount = registry_snapshot(&ml);
                 uint32_t freecpus = 0;
                 for (int mi = 0; mi < mcount; mi++) {
                     if (!ml) break;
@@ -533,6 +552,7 @@ static void *scheduler_thread(void *arg)
                     }
                 }
                 dctx.available_mem_mb = freemem;
+                free(ml);
             }
             dc_result_t dres;
             if (decision_core_decide(&dctx, &dres) == 0) {
@@ -589,6 +609,7 @@ static void *scheduler_thread(void *arg)
                                 db_update_job_status(job->id, JOB_STATUS_CREATED, 0, 0);
                                 db_update_status_reason(job->id, "Waiting for refinement subjobs");
                                 /* Do not dispatch parent now */
+                                job_free(job);
                                 continue;
                             }
                         }
@@ -687,9 +708,10 @@ static void *scheduler_thread(void *arg)
                               job->req_ram_mb, job->req_disk_mb,
                               machine_id) == 0) {
                 /* Skip dispatch if machine is probed offline */
-                Machine *mach = registry_get(machine_id);
-                if (mach && mach->type == MACHINE_TYPE_STATIC &&
-                    mach->probe_status == MACHINE_OFFLINE) {
+                Machine machine;
+                if (registry_get_copy(machine_id, &machine) == 0 &&
+                    machine.type == MACHINE_TYPE_STATIC &&
+                    machine.probe_status == MACHINE_OFFLINE) {
                     log_warn("scheduler",
                         "Machine %s offline, releasing reservation for job %s",
                         machine_id, job->id);
@@ -717,7 +739,8 @@ static void *scheduler_thread(void *arg)
                             job->user_id, job->id, job->machine_id);
         }
 
-        executor_spawn(job);
+        scheduler_dispatch(job);
+        }
     }
 
     log_info("scheduler", "Scheduler stopped");
@@ -732,34 +755,35 @@ Queue *scheduler_init(void)
 {
     s_queue = queue_create(64);
     if (!s_queue) return NULL;
+    int interrupted = db_recover_after_restart();
+    if (interrupted < 0)
+        log_error("scheduler", "Failed to reconcile interrupted jobs at startup");
+    else if (interrupted > 0)
+        log_warn("scheduler", "Marked %d interrupted job(s) as failed", interrupted);
 
-    int recovered = db_recover_incomplete_jobs();
-    if (recovered > 0)
-        log_warn("scheduler", "Marked %d interrupted job(s) as FAILED", recovered);
-
-    enum { RECOVERY_PAGE_SIZE = 256 };
-    Job *page = (Job *)malloc(RECOVERY_PAGE_SIZE * sizeof(Job));
-    if (!page) {
-        queue_destroy(s_queue);
-        s_queue = NULL;
-        return NULL;
-    }
-    int offset = 0;
-    for (;;) {
-        int count = db_list_queued_jobs(page, RECOVERY_PAGE_SIZE, offset);
-        for (int i = 0; i < count; i++) {
+    Job *queued_jobs = NULL;
+    int queued_count = db_load_jobs_by_status(JOB_STATUS_QUEUED, &queued_jobs);
+    if (queued_count < 0) {
+        log_error("scheduler", "Failed to reload queued jobs from SQLite");
+    } else {
+        for (int i = 0; i < queued_count; i++) {
             Job *job = (Job *)malloc(sizeof(Job));
-            if (!job) continue;
-            *job = page[i];
-            if (queue_push(s_queue, job) != 0) job_free(job);
+            if (!job) {
+                db_update_job_status(queued_jobs[i].id, JOB_STATUS_FAILED, -1, time(NULL));
+                db_update_status_reason(queued_jobs[i].id, "Out of memory during startup recovery");
+                continue;
+            }
+            *job = queued_jobs[i];
+            if (queue_push(s_queue, job) != 0) {
+                db_update_job_status(job->id, JOB_STATUS_FAILED, -1, time(NULL));
+                db_update_status_reason(job->id, "Failed to restore scheduler queue");
+                free(job);
+            }
         }
-        offset += count;
-        if (count < RECOVERY_PAGE_SIZE) break;
+        if (queued_count > 0)
+            log_info("scheduler", "Restored %d queued job(s) from SQLite", queued_count);
     }
-    free(page);
-    if (offset > 0)
-        log_info("scheduler", "Recovered %d queued job(s) from SQLite", offset);
-
+    free(queued_jobs);
     /* Initialize decision core (config_path optional) */
     decision_core_init(NULL);
     return s_queue;
@@ -767,42 +791,70 @@ Queue *scheduler_init(void)
 
 void scheduler_start(void)
 {
+    if (!s_queue || s_thread_started) return;
     s_running = 1;
 #ifdef _WIN32
     s_scheduler_thread = CreateThread(NULL, 0, scheduler_thread, NULL, 0, NULL);
-    if (!s_scheduler_thread) s_running = 0;
-#else
-    if (pthread_create(&s_scheduler_thread, NULL, scheduler_thread, NULL) == 0)
-        s_scheduler_thread_started = 1;
-    else
+    if (!s_scheduler_thread) {
         s_running = 0;
+        log_error("scheduler", "Failed to create scheduler thread");
+        return;
+    }
+#else
+    if (pthread_create(&s_scheduler_thread, NULL, scheduler_thread, NULL) != 0) {
+        s_running = 0;
+        log_error("scheduler", "Failed to create scheduler thread");
+        return;
+    }
 #endif
+    s_thread_started = 1;
 }
 
 void scheduler_stop(void)
 {
     s_running = 0;
-    if (s_queue) queue_shutdown(s_queue);
+    if (s_thread_started) {
 #ifdef _WIN32
-    if (s_scheduler_thread) {
         WaitForSingleObject(s_scheduler_thread, INFINITE);
         CloseHandle(s_scheduler_thread);
         s_scheduler_thread = NULL;
-    }
 #else
-    if (s_scheduler_thread_started) {
         pthread_join(s_scheduler_thread, NULL);
-        s_scheduler_thread_started = 0;
-    }
 #endif
+        s_thread_started = 0;
+    }
+    if (s_queue) queue_shutdown(s_queue);
+    executor_shutdown();
     if (s_queue) {
-        Job *job;
-        while ((job = queue_try_pop(s_queue)) != NULL) job_free(job);
+        Job *queued = NULL;
+        while ((queued = queue_try_pop(s_queue)) != NULL) job_free(queued);
         queue_destroy(s_queue);
         s_queue = NULL;
     }
-    /* Shutdown decision core */
+    alloc_shutdown();
     decision_core_shutdown();
+}
+
+int scheduler_cancel_job(const char *job_id, const char *reason)
+{
+    if (!job_id || !job_id[0]) return -1;
+    Job *queued = s_queue ? queue_remove_by_id(s_queue, job_id) : NULL;
+    if (queued) {
+        int result = job_set_status_r(queued, JOB_STATUS_CANCELLED,
+                                      reason ? reason : "Cancelled");
+        job_free(queued);
+        return result;
+    }
+    if (executor_cancel(job_id, reason ? reason : "Cancelled") == 0) return 0;
+
+    Job *job = db_get_job(job_id);
+    if (!job) return -1;
+    int result = -1;
+    if (job->status == JOB_STATUS_CREATED || job->status == JOB_STATUS_QUEUED)
+        result = job_set_status_r(job, JOB_STATUS_CANCELLED,
+                                  reason ? reason : "Cancelled");
+    job_free(job);
+    return result;
 }
 
 Queue *scheduler_queue(void)

@@ -14,6 +14,8 @@ typedef CONDITION_VARIABLE cond_t;
 #  define cond_wait(c,m)   SleepConditionVariableCS(c, m, INFINITE)
 #  define cond_signal(c)   WakeConditionVariable(c)
 #  define cond_broadcast(c) WakeAllConditionVariable(c)
+#  define mutex_destroy(m) DeleteCriticalSection(m)
+#  define cond_destroy(c) ((void)(c))
 #else
 #  include <pthread.h>
 typedef pthread_mutex_t mutex_t;
@@ -25,6 +27,8 @@ typedef pthread_cond_t  cond_t;
 #  define cond_wait(c,m)   pthread_cond_wait(c, m)
 #  define cond_signal(c)   pthread_cond_signal(c)
 #  define cond_broadcast(c) pthread_cond_broadcast(c)
+#  define mutex_destroy(m) pthread_mutex_destroy(m)
+#  define cond_destroy(c) pthread_cond_destroy(c)
 #endif
 
 struct Queue {
@@ -89,13 +93,17 @@ Queue *queue_create(int initial_capacity)
 void queue_destroy(Queue *q)
 {
     if (!q) return;
+    mutex_destroy(&q->lock);
+    cond_destroy(&q->not_empty);
     free(q->heap);
     free(q);
 }
 
 int queue_push(Queue *q, Job *job)
 {
+    if (!q || !job) return -1;
     mutex_lock(&q->lock);
+    if (q->shutdown) { mutex_unlock(&q->lock); return -1; }
     if (q->size == q->capacity) {
         int new_cap = q->capacity * 2;
         Job **new_heap = (Job **)realloc(q->heap, sizeof(Job *) * new_cap);
@@ -105,10 +113,11 @@ int queue_push(Queue *q, Job *job)
     }
     q->heap[q->size++] = job;
     heap_up(q, q->size - 1);
+    int new_size = q->size;
     cond_signal(&q->not_empty);
     mutex_unlock(&q->lock);
     log_debug("queue", "Pushed job %s (priority=%d), queue size=%d",
-              job->id, job->priority, q->size);
+              job->id, job->priority, new_size);
     return 0;
 }
 
@@ -183,6 +192,11 @@ Job *queue_remove(Queue *q, const char *job_id)
     }
     mutex_unlock(&q->lock);
     return job;
+}
+
+Job *queue_remove_by_id(Queue *q, const char *job_id)
+{
+    return queue_remove(q, job_id);
 }
 
 int queue_size(Queue *q)

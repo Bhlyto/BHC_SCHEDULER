@@ -1,4 +1,5 @@
 #include "transfer.h"
+#include "http.h"
 #include "log.h"
 #include "mongoose.h"
 #include <stdio.h>
@@ -15,12 +16,7 @@ int download_handle(struct mg_connection *c,
                     struct mg_http_message *hm,
                     const char *job_id, const char *filename)
 {
-    /* Sanitise filename */
-    const char *base = filename;
-    const char *p;
-    for (p = filename; *p; p++)
-        if (*p == '/' || *p == '\\') base = p + 1;
-    if (!*base || strcmp(base, "..") == 0) {
+    if (!transfer_valid_filename(filename)) {
         log_warn("download", "Invalid filename: %s", filename);
         return -1;
     }
@@ -30,9 +26,9 @@ int download_handle(struct mg_connection *c,
 
     char path[768];
 #ifdef _WIN32
-    snprintf(path, sizeof(path), "%s\\%s", output_dir, base);
+    snprintf(path, sizeof(path), "%s\\%s", output_dir, filename);
 #else
-    snprintf(path, sizeof(path), "%s/%s", output_dir, base);
+    snprintf(path, sizeof(path), "%s/%s", output_dir, filename);
 #endif
 
     struct stat st;
@@ -44,9 +40,12 @@ int download_handle(struct mg_connection *c,
     /* Send file using Mongoose built-in helper */
     struct mg_http_serve_opts opts;
     memset(&opts, 0, sizeof(opts));
+    char headers[1536] = {0};
+    http_build_headers(headers, sizeof(headers), "application/octet-stream");
+    opts.extra_headers = headers;
     mg_http_serve_file(c, hm, path, &opts);
 
     log_info("download", "Serving %s (%ld bytes) for job %s",
-             base, (long)st.st_size, job_id);
+             filename, (long)st.st_size, job_id);
     return 0;
 }

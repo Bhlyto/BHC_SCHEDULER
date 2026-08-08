@@ -13,6 +13,16 @@
         return { 'X-API-Key': currentApiKey, 'Content-Type': 'application/json' };
     }
 
+    function appendTableRow(tbody, values) {
+        const row = document.createElement('tr');
+        values.forEach(value => {
+            const cell = document.createElement('td');
+            cell.textContent = value === undefined || value === null ? '' : String(value);
+            row.appendChild(cell);
+        });
+        tbody.appendChild(row);
+    }
+
     async function apiFetch(url) {
         const res = await fetch(API + url, { headers: headers() });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -84,12 +94,10 @@
 
         /* Summary table */
         const tbody = document.getElementById('report-jobs-table');
-        tbody.innerHTML = '';
+        tbody.replaceChildren();
         data.forEach(d => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `<td>${d.period}</td><td>${d.total}</td><td>${d.finished}</td>` +
-                `<td>${d.failed}</td><td>${d.avg_duration_s ? d.avg_duration_s.toFixed(1) + 's' : '-'}</td>`;
-            tbody.appendChild(tr);
+            appendTableRow(tbody, [d.period, d.total, d.finished, d.failed,
+                d.avg_duration_s ? d.avg_duration_s.toFixed(1) + 's' : '-']);
         });
     }
 
@@ -101,13 +109,11 @@
         renderBarChart(container, data.map(d => d.user_id), data.map(d => d.total_jobs), '#81c784');
 
         const tbody = document.getElementById('report-users-table');
-        tbody.innerHTML = '';
+        tbody.replaceChildren();
         data.forEach(d => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `<td>${d.user_id}</td><td>${d.total_jobs}</td><td>${d.finished}</td>` +
-                `<td>${d.failed}</td><td>${d.avg_duration_s ? d.avg_duration_s.toFixed(1) + 's' : '-'}</td>` +
-                `<td>${d.total_cores_used}</td><td>${d.total_ram_mb_used}</td>`;
-            tbody.appendChild(tr);
+            appendTableRow(tbody, [d.user_id, d.total_jobs, d.finished, d.failed,
+                d.avg_duration_s ? d.avg_duration_s.toFixed(1) + 's' : '-',
+                d.total_cores_used, d.total_ram_mb_used]);
         });
     }
 
@@ -119,12 +125,10 @@
         renderBarChart(container, data.map(d => d.app_id), data.map(d => d.total_jobs), '#ffb74d');
 
         const tbody = document.getElementById('report-apps-table');
-        tbody.innerHTML = '';
+        tbody.replaceChildren();
         data.forEach(d => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `<td>${d.app_id}</td><td>${d.total_jobs}</td><td>${d.finished}</td>` +
-                `<td>${d.failed}</td><td>${d.avg_duration_s ? d.avg_duration_s.toFixed(1) + 's' : '-'}</td>`;
-            tbody.appendChild(tr);
+            appendTableRow(tbody, [d.app_id, d.total_jobs, d.finished, d.failed,
+                d.avg_duration_s ? d.avg_duration_s.toFixed(1) + 's' : '-']);
         });
     }
 
@@ -136,13 +140,11 @@
         renderBarChart(container, data.map(d => d.machine_id), data.map(d => d.total_allocations), '#e57373');
 
         const tbody = document.getElementById('report-machines-table');
-        tbody.innerHTML = '';
+        tbody.replaceChildren();
         data.forEach(d => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `<td>${d.machine_id}</td><td>${d.total_allocations}</td>` +
-                `<td>${d.total_cores_reserved}</td><td>${d.total_ram_mb_reserved}</td>` +
-                `<td>${d.avg_utilization_pct ? d.avg_utilization_pct.toFixed(1) + '%' : '-'}</td>`;
-            tbody.appendChild(tr);
+            appendTableRow(tbody, [d.machine_id, d.total_allocations,
+                d.total_cores_reserved, d.total_ram_mb_reserved,
+                d.avg_utilization_pct ? d.avg_utilization_pct.toFixed(1) + '%' : '-']);
         });
     }
 
@@ -150,21 +152,46 @@
     async function loadMachineStatus() {
         const data = await apiFetch('/admin/machines/status');
         const container = document.getElementById('machines-status-grid');
-        container.innerHTML = '';
+        container.replaceChildren();
         data.forEach(m => {
             const card = document.createElement('div');
-            card.className = `machine-card status-${m.status}`;
-            card.innerHTML = `
-                <div class="machine-name">${esc(m.id)}</div>
-                <div class="machine-meta">${esc(m.hostname || m.ip)}</div>
-                <div class="machine-status-badge">${m.status.toUpperCase()}</div>
-                <div class="machine-detail">
-                    Type: ${m.type} ${m.cloud_provider ? '(' + esc(m.cloud_provider) + ')' : ''}<br>
-                    Cores: ${m.cores_reserved}/${m.cores_total} | RAM: ${m.ram_mb_reserved}/${m.ram_mb_total} MB
-                    ${m.mac_address ? '<br>MAC: ' + esc(m.mac_address) : ''}
-                </div>
-                ${m.mac_address && m.status === 'offline' ? '<button class="btn-wol" data-id="' + esc(m.id) + '">Wake (WoL)</button>' : ''}
-            `;
+            const status = String(m.status || 'unknown');
+            card.className = 'machine-card status-' + status.replace(/[^a-z0-9_-]/gi, '');
+
+            const name = document.createElement('div');
+            name.className = 'machine-name';
+            name.textContent = m.id || '';
+            card.appendChild(name);
+
+            const meta = document.createElement('div');
+            meta.className = 'machine-meta';
+            meta.textContent = m.hostname || m.ip || '';
+            card.appendChild(meta);
+
+            const badge = document.createElement('div');
+            badge.className = 'machine-status-badge';
+            badge.textContent = status.toUpperCase();
+            card.appendChild(badge);
+
+            const detail = document.createElement('div');
+            detail.className = 'machine-detail';
+            const provider = m.cloud_provider ? ` (${m.cloud_provider})` : '';
+            const detailLines = [
+                `Type: ${m.type || ''}${provider}`,
+                `Cores: ${m.cores_reserved || 0}/${m.cores_total || 0} | RAM: ${m.ram_mb_reserved || 0}/${m.ram_mb_total || 0} MB`
+            ];
+            if (m.mac_address) detailLines.push(`MAC: ${m.mac_address}`);
+            detail.textContent = detailLines.join('\n');
+            detail.style.whiteSpace = 'pre-line';
+            card.appendChild(detail);
+
+            if (m.mac_address && status === 'offline') {
+                const button = document.createElement('button');
+                button.className = 'btn-wol';
+                button.dataset.id = m.id || '';
+                button.textContent = 'Wake (WoL)';
+                card.appendChild(button);
+            }
             container.appendChild(card);
         });
 
@@ -189,14 +216,11 @@
         const data = await apiFetch(url);
 
         const tbody = document.getElementById('events-table-body');
-        tbody.innerHTML = '';
+        tbody.replaceChildren();
         data.forEach(ev => {
-            const tr = document.createElement('tr');
             const dt = new Date(ev.created_at * 1000).toLocaleString();
-            tr.innerHTML = `<td>${dt}</td><td>${esc(ev.category)}</td><td>${esc(ev.event_type)}</td>` +
-                `<td>${esc(ev.detail)}</td><td>${esc(ev.user_id)}</td>` +
-                `<td>${esc(ev.job_id)}</td><td>${esc(ev.machine_id)}</td>`;
-            tbody.appendChild(tr);
+            appendTableRow(tbody, [dt, ev.category, ev.event_type, ev.detail,
+                ev.user_id, ev.job_id, ev.machine_id]);
         });
     }
 
@@ -223,13 +247,6 @@
         } catch (e) {
             alert('Provisioning failed: ' + e.message);
         }
-    }
-
-    function esc(s) {
-        if (!s) return '';
-        const d = document.createElement('div');
-        d.textContent = s;
-        return d.innerHTML;
     }
 
     /* ── Initialize ──────────────────────────────────────────────── */

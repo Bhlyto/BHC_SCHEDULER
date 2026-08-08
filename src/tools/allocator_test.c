@@ -68,6 +68,12 @@ int main(void)
         cleanup();
         return 1;
     }
+    if (registry_update_probe("node-a", MACHINE_ONLINE, time(NULL), 1) != 0 ||
+        registry_update_probe("node-b", MACHINE_ONLINE, time(NULL), 1) != 0) {
+        db_close();
+        cleanup();
+        return 1;
+    }
 
     for (int i = 0; i < 1500; i++) {
         char job_id[37];
@@ -82,16 +88,24 @@ int main(void)
         }
     }
 
-    int machine_count = 0;
-    Machine *machines = registry_all(&machine_count);
+    Machine *machines = NULL;
+    int machine_count = registry_snapshot(&machines);
+    if (machine_count < 0) {
+        fprintf(stderr, "failed to snapshot registry\n");
+        db_close();
+        cleanup();
+        return 1;
+    }
     for (int i = 0; i < machine_count; i++) {
         if (machines[i].cores_reserved != 0 || machines[i].ram_mb_reserved != 0) {
             fprintf(stderr, "resources leaked after repeated allocations\n");
+            free(machines);
             db_close();
             cleanup();
             return 1;
         }
     }
+    free(machines);
 
     if (alloc_can_fit(4, 0, 0, 0) != 0) {
         fprintf(stderr, "cores_min was not respected\n");

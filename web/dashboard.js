@@ -17,7 +17,7 @@ async function loadDashboard() {
     const jobs = await api('GET', '/jobs');
     const recent = (Array.isArray(jobs) ? jobs : []).slice(0, 10);
     document.getElementById('recentJobsBody').innerHTML = recent.map(j =>
-      '<tr style="cursor:pointer" onclick="showJobDetail(\''+j.id+'\')"><td title="'+esc(j.id)+'">'+shortId(j.id)+'</td><td>'+esc(j.command)+'</td><td>'+statusBadge(j.status)+'</td><td>'+esc(j.user_id)+'</td><td>'+fmtDate(j.submitted_at)+'</td></tr>'
+      '<tr style="cursor:pointer" data-action="job-detail" data-job-id="'+esc(j.id)+'"><td title="'+esc(j.id)+'">'+esc(shortId(j.id))+'</td><td>'+esc(j.command)+'</td><td>'+statusBadge(j.status)+'</td><td>'+esc(j.user_id)+'</td><td>'+fmtDate(j.submitted_at)+'</td></tr>'
     ).join('') || '<tr><td colspan="5" style="color:var(--text2)">No jobs</td></tr>';
   } catch(e) { toast('Failed to load dashboard', true); }
 }

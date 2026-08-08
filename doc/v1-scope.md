@@ -26,7 +26,7 @@ without coupling it to the scheduler.
 | P0 | Strict C11 build failed | Move nested functions to file scope and test every target | Reproducible Windows/Linux build | None material |
 | P0 | Cancel/timeout changed DB state without killing work | Track process trees and terminate them | No orphan simulations or leaked capacity | OS-specific lifecycle code |
 | P0 | Shutdown could close SQLite while threads used it | Stop scheduler, terminate/drain executor, then close DB | Deterministic shutdown | Shutdown may wait up to 30 s |
-| P0 | Allocation records exhausted after 1024 historical jobs | Reuse released slots and persist releases | Long-running service supports repeated campaigns | In-memory allocator still has a 1024 concurrent-job cap |
+| P0 | Allocation records exhausted after 1024 historical jobs | Grow and reuse allocation records; persist releases transactionally | Long-running service supports repeated campaigns | Allocation history remains in SQLite until operational cleanup |
 | P0 | Restart lost queued jobs and active allocations | Reload queued jobs; fail interrupted work; release allocations | Predictable crash recovery | Running work is not resumed in v1 |
 | P0 | A blocked priority job starved runnable work | Select the highest-priority compatible job | Work-conserving deterministic queue | Strict priority is relaxed only when the head cannot run |
 | P0 | “Multi-machine job” launched only on the first reserved host | One job = one worker; distribute batches | Correct semantics and 262 fewer lines | MPI-style jobs are deferred |
@@ -58,15 +58,28 @@ storage system are not planned for v1.
 Automated gates:
 
 - strict C11 build succeeds;
-- all CTest lifecycle, recovery, allocator, queue, batch, artifact, and retry
-  tests pass;
+- all 11 CTest targets pass, including lifecycle, recovery, allocator, queue,
+  batch, artifact, retry, upstream unit tests, and the scale proof;
 - `scale_1000` submits and executes 1000 real local processes in one batch,
   requires 1000 `SUCCEEDED`, and verifies collected artifacts;
 - `git diff --check` is clean.
 
-The scale proof measured 17.55 seconds on the development Windows machine on
+The scale proof measured 10.73 seconds after the upstream-hardening merge on
+the development Windows machine on
 2026-08-08. This number is evidence of completion, not a portable performance
 guarantee.
+
+## Upstream hardening integrated before release
+
+The branch merges `origin/main` hardening before any v1 tag. The integration
+keeps upstream authentication, CORS/HTTPS validation, idempotent submissions,
+operational metrics, safe registry snapshots, transactional allocation writes,
+and the additional unit-test target. Where the two branches disagreed, the v1
+contract remains authoritative: six public states, one worker per job,
+process-tree cancellation, filesystem artifact metadata, bounded anti-starvation
+queue scans, and experimental decision-core/cloud/workflow behavior disabled by
+default. This ordering avoids tagging a v1 that is already behind the mainline
+security baseline.
 
 Manual gates before the final v1 tag:
 
@@ -99,4 +112,7 @@ per decision:
 11. `7d06ad1` expose the minimal worker and queue API;
 12. `cc1e104` reduce jobs to six v1 states;
 13. `7b45da0` retry terminal jobs safely;
-14. `57244e2` execute a 1000-job campaign in CI/local tests.
+14. `57244e2` execute a 1000-job campaign in CI/local tests;
+15. `e3a8061` document and enforce the v1 support scope;
+16. the final merge commit integrates upstream hardening and records the
+    conflict-resolution decisions above.

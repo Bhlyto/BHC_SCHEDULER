@@ -1,6 +1,8 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+#include <stddef.h>
+
 typedef struct {
     int  listen_port;
     char work_dir[512];
@@ -24,7 +26,9 @@ typedef struct {
     char ssh_shell[64];          /* remote shell, e.g. "/bin/rbash" (empty = default) */
 
     /* ── Security ── */
-    char command_mode[16];       /* "free" (default) or "app_only" */
+    char command_mode[16];       /* "app_only" (default) or "free" */
+    char cors_allowed_origin[256]; /* exact allowed origin; empty disables CORS */
+    int  require_https;          /* require X-Forwarded-Proto=https */
 
     /* ── Web UI / Bastion mode ── */
     int  web_ui_enabled;         /* 1 = serve legacy UI, 0 = API-only v1 default */
@@ -60,5 +64,6 @@ extern Config g_config;
 
 int  config_load(const char *path);
 void config_defaults(void);
+int  config_validate(char *error, size_t error_len);
 
 #endif /* CONFIG_H */

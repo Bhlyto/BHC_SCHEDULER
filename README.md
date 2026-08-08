@@ -22,6 +22,7 @@ and uses Mongoose, SQLite, cJSON, SSH, and a filesystem artifact backend.
 - **Real-time events** — subscribe to a Server-Sent Events (SSE) stream for live job state updates and an initial snapshot
 - **Event persistence** — status and dispatch events are recorded for diagnosis
 - **Stats endpoint** — aggregated view of job counts by state and cluster resource utilisation
+- **Operations endpoints** — Prometheus metrics, drain mode, filtered pagination, and idempotent job submissions
 - **User management** — create, update, and delete users with password authentication via admin API
 - **Password authentication** — users log in with user ID and password; receive a temporary API key
 - **API key management** — create, list, and revoke API keys; bind keys to users with role-based access (admin/user)
@@ -66,12 +67,41 @@ cmake --build build
 # Output: build/bin/orchestrator
 ```
 
+### Test
+
+```powershell
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build --config Debug
+ctest --test-dir build -C Debug --output-on-failure
+```
+
+The API smoke tests target an already running instance and require `API_KEY`:
+
+```powershell
+$env:API_KEY = "<key>"
+.\tests\test_api.ps1
+```
+
+```bash
+API_KEY="<key>" ./tests/test_api.sh
+```
+
+### Package
+
+```powershell
+cmake --build build --config Release --target package
+```
+
+CPack produces self-contained ZIP/TGZ archives with the binaries, `config/`, and `web/` assets.
+
 ### Run
 
 ```powershell
 .\build\bin\Debug\orchestrator.exe                          # default config
 .\build\bin\Debug\orchestrator.exe --conf path\to\conf      # custom config
 ```
+
+The secure default is `command_mode = app_only`: clients submit a registered `app_id` and typed `parameters`; resource requirements come from the server-side app definition. Enable `free` mode only in a trusted environment.
 
 ### Generate an API Key
 

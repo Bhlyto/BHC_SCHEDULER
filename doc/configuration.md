@@ -5,11 +5,20 @@ All keys are optional — built-in defaults are used for any missing key.
 Lines starting with `#` are comments.
 Paths can be **absolute** or **relative to the executable directory** (resolved automatically on Windows).
 
+Parsing is strict: unknown keys, malformed numbers, overlong lines, and out-of-range values stop startup with an explicit error instead of silently falling back.
+
 ## Full configuration reference
 
 ```ini
 # ── HTTP server ───────────────────────────────────
 listen_port           = 8080
+
+# Security defaults: registered apps only and same-origin browser access.
+command_mode          = app_only
+cors_allowed_origin   =
+
+# Enable behind a TLS reverse proxy. The proxy must set X-Forwarded-Proto.
+require_https         = 0
 
 # ── Web UI / Bastion mode ─────────────────────────
 # Set to 0 to disable the web UI entirely (API-only / bastion mode).

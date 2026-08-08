@@ -4,6 +4,8 @@
 #include "job.h"
 
 int executor_spawn(Job *job);
+int executor_cancel(const char *job_id, const char *reason);
+int executor_timeout(const char *job_id, const char *reason);
 
 /* Terminate the active process tree for job_id. Returns 1 when an active
    process was found, 0 when the job has not started or already exited. */

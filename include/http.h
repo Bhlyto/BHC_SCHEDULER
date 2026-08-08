@@ -39,10 +39,14 @@ int auth_check_role_user(struct mg_connection *c, struct mg_http_message *hm,
 void auth_hash_key(const char *raw_key, char *out_hex_65);
 
 /* Hash a password with random salt → "hexsalt$hexhash" (97 chars + NUL). */
-void auth_hash_password(const char *password, char *out_buf_98);
+#define AUTH_PASSWORD_HASH_LEN 160
+int auth_hash_password(const char *password, char *out_buf);
 
 /* Verify a password against a stored hash (salted or legacy). Returns 1 on match. */
 int  auth_verify_password(const char *password, const char *stored_hash);
+int  auth_password_needs_rehash(const char *stored_hash);
+
+void http_build_headers(char *out, int out_len, const char *content_type);
 
 /* ── Response helpers ────────────────────────── */
 

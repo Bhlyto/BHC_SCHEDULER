@@ -66,8 +66,8 @@ int main(void)
     int ok = q && q->status == JOB_STATUS_QUEUED &&
              s && s->status == JOB_STATUS_FAILED &&
              r && r->status == JOB_STATUS_FAILED &&
-             strstr(s->status_reason, "restarted") != NULL &&
-             strstr(r->status_reason, "restarted") != NULL;
+             strstr(s->status_reason, "restart") != NULL &&
+             strstr(r->status_reason, "restart") != NULL;
     job_free(q);
     job_free(s);
     job_free(r);

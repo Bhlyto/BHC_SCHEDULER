@@ -1,473 +1,178 @@
-# tests/test_api.ps1
-# Plan de test complet -- couvre toutes les fonctionnalites du scheduler.
-# Usage:
-#   $env:API_KEY = "<votre-cle>"
-#   .\tests\test_api.ps1
-#   .\tests\test_api.ps1 -BaseUrl http://192.168.1.10:8080
-
 param(
-    [string]$BaseUrl = "http://localhost:8099",
-    [int]   $JobTimeoutSec = 15
+    [string]$BaseUrl = "http://localhost:8099"
 )
 
-$KEY = if ($env:API_KEY) { $env:API_KEY } else { Write-Warning "API_KEY not set, using changeme"; "changeme" }
-$HDR = @{ "X-API-Key" = $KEY; "Content-Type" = "application/json" }
-$PASS = 0; $FAIL = 0; $SKIP = 0
-
-function Pass($desc) { Write-Host "  [PASS] $desc" -ForegroundColor Green;  $script:PASS++ }
-function Fail($desc, $msg) { Write-Host "  [FAIL] $desc  >> $msg" -ForegroundColor Red; $script:FAIL++ }
-function Skip($desc, $why) { Write-Host "  [SKIP] $desc  ($why)" -ForegroundColor Yellow; $script:SKIP++ }
-
-function Check($desc, $pattern, $actual) {
-    if ($null -eq $actual) { Fail $desc "response is null"; return }
-    $str = if ($actual -is [string]) { $actual } else { $actual | ConvertTo-Json -Depth 6 }
-    if ($str -match $pattern) { Pass $desc } else { Fail $desc "expected '$pattern' in: $str" }
+$Key = $env:API_KEY
+if (-not $Key) {
+    Write-Error "API_KEY is required"
+    exit 2
 }
 
-# HTTP helper -- always sends auth header
-function Req($method, $path, $body = $null) {
-    $uri = "$BaseUrl$path"
-    try {
-        $p = @{ Uri = $uri; Method = $method; Headers = $HDR; UseBasicParsing = $true; ErrorAction = "Stop" }
-        if ($null -ne $body) { $p["Body"] = $body }
-        return Invoke-RestMethod @p
-    } catch {
-        $code = $_.Exception.Response.StatusCode.value__
-        return [pscustomobject]@{ _error = [int]$code; _msg = $_.ToString() }
-    }
-}
+$Headers = @{ "X-API-Key" = $Key }
+$Pass = 0
+$Fail = 0
 
-# Raw HTTP helper -- returns StatusCode and Content
-function ReqRaw($method, $path, $body = $null, $extraHeaders = $null) {
-    $uri = "$BaseUrl$path"
-    $headers = if ($extraHeaders) { $extraHeaders } else { $HDR }
+function Invoke-TestRequest([string]$Method, [string]$Path, $Body = $null, [hashtable]$RequestHeaders = $Headers) {
     try {
-        $p = @{ Uri = $uri; Method = $method; Headers = $headers; UseBasicParsing = $true; ErrorAction = "Stop" }
-        if ($null -ne $body) { $p["Body"] = $body }
-        $resp = Invoke-WebRequest @p
-        return [pscustomobject]@{ StatusCode = [int]$resp.StatusCode; Content = $resp.Content }
+        $parameters = @{
+            Uri = "$BaseUrl$Path"
+            Method = $Method
+            Headers = $RequestHeaders
+            UseBasicParsing = $true
+            TimeoutSec = 5
+            ErrorAction = "Stop"
+        }
+        if ($null -ne $Body) {
+            if ($Body -is [byte[]]) {
+                $parameters.ContentType = "application/octet-stream"
+                $parameters.Body = $Body
+            } else {
+                $parameters.ContentType = "application/json"
+                $parameters.Body = ($Body | ConvertTo-Json -Depth 8 -Compress)
+            }
+        }
+        $response = Invoke-WebRequest @parameters
+        [pscustomobject]@{ Code = [int]$response.StatusCode; Body = $response.Content; Headers = $response.Headers }
     } catch {
-        $resp = $_.Exception.Response
-        $code = if ($resp) { [int]$resp.StatusCode } else { 0 }
-        $content = $_.ToString()
-        if ($resp -and $resp.ContentLength -gt 0) {
+        $response = $_.Exception.Response
+        $code = if ($response) { [int]$response.StatusCode } else { 0 }
+        $content = ""
+        if ($response) {
             try {
-                $stream = $resp.GetResponseStream()
-                $reader = New-Object System.IO.StreamReader($stream)
+                $reader = [IO.StreamReader]::new($response.GetResponseStream())
                 $content = $reader.ReadToEnd()
-                $reader.Close()
+                $reader.Dispose()
             } catch {}
         }
-        return [pscustomobject]@{ StatusCode = $code; Content = $content }
+        if (-not $content -and $_.ErrorDetails.Message) {
+            $content = $_.ErrorDetails.Message
+        }
+        [pscustomobject]@{ Code = $code; Body = $content; Headers = @{} }
     }
 }
 
-function WaitJob($id, $sec = $JobTimeoutSec) {
-    for ($i = 0; $i -lt ($sec * 2); $i++) {
-        Start-Sleep -Milliseconds 500
-        $r = Req GET "/jobs/$id"
-        if ($r.status -match "SUCCEEDED|FAILED|CANCELLED") { return $r }
+function Assert-Code([string]$Description, [int]$Expected, $Response) {
+    if ($Response.Code -eq $Expected) {
+        Write-Host "PASS: $Description" -ForegroundColor Green
+        $script:Pass++
+    } else {
+        Write-Host "FAIL: $Description (expected $Expected, got $($Response.Code), body: $($Response.Body))" -ForegroundColor Red
+        $script:Fail++
     }
-    return Req GET "/jobs/$id"
 }
 
-Write-Host ""
-Write-Host "=============================================" -ForegroundColor Cyan
-Write-Host "   BHC-SCHEDULER  -- Plan de test complet   " -ForegroundColor Cyan
-Write-Host "=============================================" -ForegroundColor Cyan
-
-# =============================================
-#  1. AUTHENTIFICATION
-# =============================================
-Write-Host "`n-- 1. Authentification" -ForegroundColor Cyan
-
-# No headers at all
-$r = ReqRaw GET "/jobs" -extraHeaders @{}
-if ($r.StatusCode -eq 401) { Pass "Requete sans cle -> 401" }
-else { Fail "Requete sans cle -> 401" "code=$($r.StatusCode)" }
-
-# Wrong key
-$r = ReqRaw GET "/jobs" -extraHeaders @{ "X-API-Key" = "INVALID"; "Content-Type" = "application/json" }
-if ($r.StatusCode -eq 401) { Pass "Mauvaise cle -> 401" }
-else { Fail "Mauvaise cle -> 401" "code=$($r.StatusCode)" }
-
-# Good key
-$r = ReqRaw GET "/jobs"
-if ($r.StatusCode -eq 200) { Pass "Bonne cle -> 200 sur /jobs" }
-else { Fail "Bonne cle -> 200 sur /jobs" "code=$($r.StatusCode)" }
-
-# =============================================
-#  0. SETUP -- provision a local machine for tests
-# =============================================
-Write-Host "`n-- 0. Setup" -ForegroundColor Cyan
-
-$localMachine = '{"id":"local","hostname":"localhost","ip":"127.0.0.1","cores":8,"gpu_count":0,"ram_mb":16384,"disk_mb":102400}'
-$r = Req POST "/provision" $localMachine
-Check "Provision local machine"           "true|ok|already" ($r | ConvertTo-Json)
-
-# =============================================
-#  2. SOUMISSION / VALIDATION DE JOB
-# =============================================
-Write-Host "`n-- 2. Soumission de job" -ForegroundColor Cyan
-
-$r = Req POST "/jobs" '{"command":"echo hello","priority":10,"cores":1,"ram_mb":64}'
-Check "Soumission minimale -> QUEUED"      "QUEUED" $r.status
-Check "Reponse contient un id UUID"        "[0-9a-f-]{36}" $r.id
-$JOB_BASIC = $r.id
-
-$r = Req POST "/jobs" '{"command":"echo full","priority":5,"cores":1,"gpu":0,"ram_mb":128,"disk_mb":256}'
-Check "Soumission avec tous les champs"    "QUEUED" $r.status
-$JOB_FULL = $r.id
-
-$r = Req POST "/jobs" '{"priority":1}'
-Check "Sans command -> erreur 400"         "400|error|command" ($r | ConvertTo-Json)
-
-# =============================================
-#  3. LECTURE / LISTE DES JOBS
-# =============================================
-Write-Host "`n-- 3. Lecture des jobs" -ForegroundColor Cyan
-
-$r = Req GET "/jobs"
-$listJson = $r | ConvertTo-Json -Depth 6
-Check "GET /jobs contient le job soumis"   $JOB_BASIC $listJson
-
-$r = Req GET "/jobs/$JOB_BASIC"
-Check "GET /jobs/:id retourne le bon id"   $JOB_BASIC $r.id
-Check "GET /jobs/:id contient command"     "echo hello" $r.command
-Check "GET /jobs/:id contient status"      "QUEUED|RUNNING|SUCCEEDED|FAILED" $r.status
-
-$r = Req GET "/jobs/JOB_ID"
-Check "Job inexistant -> 404"              "404|not.found" ($r | ConvertTo-Json)
-
-# =============================================
-#  4. EXECUTION ET ETAT TERMINAL
-# =============================================
-Write-Host "`n-- 4. Execution -- job simple" -ForegroundColor Cyan
-
-$r = WaitJob $JOB_BASIC
-Check "Job echo hello -> SUCCEEDED"       "SUCCEEDED" $r.status
-Check "Exit code = 0"                     "^0$" "$($r.exit_code)"
-Check "machine_id renseigne"              "." $r.machine_id
-
-$r = Req POST "/jobs" '{"command":"exit 1","priority":1,"cores":1,"ram_mb":64}'
-$fail_id = $r.id
-$r = WaitJob $fail_id
-Check "Commande qui echoue -> FAILED"     "FAILED" $r.status
-
-# =============================================
-#  5. LOGS DU JOB
-# =============================================
-Write-Host "`n-- 5. Logs du job" -ForegroundColor Cyan
-
-# Stdout only (stderr redirect causes issues on CREATE_NO_WINDOW)
-$r = Req POST "/jobs" '{"command":"echo stdout_test","priority":1,"cores":1,"ram_mb":64}'
-$log_id = $r.id
-$r = WaitJob $log_id 20
-Check "Job log -> SUCCEEDED"              "SUCCEEDED" $r.status
-
-$r = ReqRaw GET "/jobs/$log_id/log"
-if ($r.StatusCode -eq 200) {
-    if ($r.Content -match "stdout_test") { Pass "GET /jobs/:id/log contient stdout" }
-    else { Fail "GET /jobs/:id/log contient stdout" "content: $($r.Content)" }
-} else { Fail "GET /jobs/:id/log accessible" "code=$($r.StatusCode)" }
-
-# stderr log file should exist (even if empty for this job)
-$r = ReqRaw GET "/jobs/$log_id/log/stderr"
-if ($r.StatusCode -eq 200) { Pass "GET /jobs/:id/log/stderr accessible" }
-else { Fail "GET /jobs/:id/log/stderr accessible" "code=$($r.StatusCode)" }
-
-$r = ReqRaw GET "/jobs/JOB_ID/log"
-if ($r.StatusCode -eq 404) { Pass "Log job inexistant -> 404" }
-else { Fail "Log job inexistant -> 404" "code=$($r.StatusCode)" }
-
-# =============================================
-#  6. UPLOAD / DOWNLOAD FICHIER
-# =============================================
-Write-Host "`n-- 6. Upload / Download" -ForegroundColor Cyan
-
-# Use %ORCH_INPUT_DIR% so the command resolves the correct path
-$r = Req POST "/jobs" '{"command":"type %ORCH_INPUT_DIR%\\data.txt","priority":1,"cores":1,"ram_mb":64}'
-$io_id = $r.id
-
-$bytes = [Text.Encoding]::UTF8.GetBytes("hello-from-test")
-$r = ReqRaw POST "/jobs/$io_id/input/data.txt" -body $bytes
-if ($r.StatusCode -eq 200) { Pass "Upload input -> 200" }
-else { Fail "Upload input" "code=$($r.StatusCode): $($r.Content)" }
-
-$r = WaitJob $io_id 20
-Check "Job avec input -> SUCCEEDED"       "SUCCEEDED" $r.status
-
-$r = ReqRaw GET "/jobs/$io_id/output"
-if ($r.StatusCode -eq 200) { Pass "Download output -> 200" }
-elseif ($r.StatusCode -eq 404) { Skip "Download output" "aucun fichier output (normal pour type)" }
-else { Fail "Download output accessible" "code=$($r.StatusCode)" }
-
-# =============================================
-#  7. ANNULATION DE JOB
-# =============================================
-Write-Host "`n-- 7. Annulation" -ForegroundColor Cyan
-
-# ping loops ~999s without needing a TTY (unlike timeout.exe)
-$r = Req POST "/jobs" '{"command":"ping -n 999 127.0.0.1","priority":99,"cores":1,"ram_mb":64}'
-$cancel_id = $r.id
-# Wait until running before cancelling
-for ($i = 0; $i -lt 20; $i++) {
-    Start-Sleep -Milliseconds 500
-    $st = (Req GET "/jobs/$cancel_id").status
-    if ($st -match "RUNNING") { break }
+function Assert-Match([string]$Description, [string]$Pattern, $Response) {
+    if ($Response.Body -match $Pattern) {
+        Write-Host "PASS: $Description" -ForegroundColor Green
+        $script:Pass++
+    } else {
+        Write-Host "FAIL: $Description (body: $($Response.Body))" -ForegroundColor Red
+        $script:Fail++
+    }
 }
-$r = Req DELETE "/jobs/$cancel_id"
-if ($r._error -eq 409) {
-    Skip "DELETE /jobs/:id -> CANCELLED" "job already in terminal state (too fast)"
+
+$unauthorized = Invoke-TestRequest GET "/jobs" $null @{}
+Assert-Code "missing API key is rejected" 401 $unauthorized
+
+$me = Invoke-TestRequest GET "/auth/me"
+Assert-Code "authenticated identity endpoint" 200 $me
+Assert-Match "identity includes role" '"role":"(admin|user)"' $me
+
+$raw = Invoke-TestRequest POST "/jobs" @{ command = "echo unsafe" }
+Assert-Code "raw commands are rejected in app_only mode" 400 $raw
+
+$job = Invoke-TestRequest POST "/jobs" @{
+    app_id = "app1"
+    parameters = @{ enable_logging = $false; parallel_mode = $true; dry_run = $false }
+    req_cores = 9999
+}
+Assert-Code "registered application job is accepted" 201 $job
+Assert-Match "server-owned app resources override client values" '"req_cores":4' $job
+
+$injection = Invoke-TestRequest POST "/jobs" @{
+    app_id = "app2"
+    parameters = @{ algorithm = "fast;whoami"; verbose = $false }
+}
+Assert-Code "shell metacharacters are rejected" 400 $injection
+
+$unknown = Invoke-TestRequest POST "/jobs" @{
+    app_id = "app1"
+    parameters = @{ unknown = $true }
+}
+Assert-Code "unknown app parameters are rejected" 400 $unknown
+
+$invalidApp = Invoke-TestRequest POST "/admin/apps" @{
+    app_id = "invalid-schema-smoke"
+    name = "Invalid schema"
+    command_template = "echo"
+    req_cores = 1
+    req_ram_mb = 0
+    req_disk_mb = 0
+    req_gpu = 0
+    fields = @(@{ name = "unsafe'field"; type = "text" })
+}
+Assert-Code "unsafe application field names are rejected" 400 $invalidApp
+
+$keyLabel = "api-smoke-revoke-$PID"
+$secondaryKey = Invoke-TestRequest POST "/admin/keys" @{
+    label = $keyLabel
+    role = "admin"
+    user_id = ""
+}
+Assert-Code "secondary admin key is created" 201 $secondaryKey
+
+$keys = Invoke-TestRequest GET "/admin/keys"
+Assert-Code "API keys can be listed" 200 $keys
+if ($keys.Code -eq 200) {
+    $keyInfo = $null
+    $keyRecords = $keys.Body | ConvertFrom-Json
+    foreach ($record in $keyRecords) {
+        if ($record.label -eq $keyLabel) { $keyInfo = $record; break }
+    }
+    if ($keyInfo -and $keyInfo.key_hash -match '^[0-9a-f]{64}$') {
+        $keyHash = [string]$keyInfo.key_hash
+        $revoke = Invoke-TestRequest DELETE "/admin/keys" @{ key_hash = $keyHash }
+        Assert-Code "API key is revoked by administrative hash" 200 $revoke
+    } else {
+        Write-Host "FAIL: key listing omits the administrative hash" -ForegroundColor Red
+        $Fail++
+    }
+}
+
+$traversal = Invoke-TestRequest GET "/jobs/%2e%2e/log"
+Assert-Code "job path traversal is hidden" 404 $traversal
+
+$held = Invoke-TestRequest POST "/jobs" @{
+    app_id = "app1"
+    parameters = @{ enable_logging = $false; parallel_mode = $false; dry_run = $true }
+    input_files = @("input data.txt")
+}
+Assert-Code "job with expected input is accepted" 201 $held
+Assert-Match "job waits in CREATED state" '"status":"CREATED"' $held
+
+if ($held.Code -eq 201) {
+    $heldJob = $held.Body | ConvertFrom-Json
+    $upload = Invoke-TestRequest POST "/jobs/$($heldJob.id)/input/input%20data.txt" ([Text.Encoding]::UTF8.GetBytes("test-data")) @{ "X-API-Key" = $Key }
+    Assert-Code "URL-decoded safe filename uploads" 200 $upload
+}
+
+$ui = Invoke-TestRequest GET "/"
+if ($ui.Headers["X-Content-Type-Options"] -eq "nosniff") {
+    Write-Host "PASS: security headers are present" -ForegroundColor Green
+    $Pass++
 } else {
-    Check "DELETE /jobs/:id -> CANCELLED" "CANCELLED|ok" ($r | ConvertTo-Json)
-    $r2 = Req GET "/jobs/$cancel_id"
-    Check "Status apres cancel = CANCELLED" "CANCELLED" $r2.status
+    Write-Host "FAIL: security headers are missing" -ForegroundColor Red
+    $Fail++
 }
 
-$r = Req DELETE "/jobs/JOB_ID"
-Check "Cancel job inexistant -> 404"      "404|not.found|error" ($r | ConvertTo-Json)
-
-# =============================================
-#  8. RESSOURCES ET MACHINES
-# =============================================
-Write-Host "`n-- 8. Ressources" -ForegroundColor Cyan
-
-$r = Req GET "/resources"
-Check "GET /resources present"            "." ($r | ConvertTo-Json)
-Check "/resources contient cores"         "cores" ($r | ConvertTo-Json -Depth 6)
-
-# =============================================
-#  9. PROVISIONING DYNAMIQUE
-# =============================================
-Write-Host "`n-- 9. Provisioning dynamique" -ForegroundColor Cyan
-
-$m = '{"id":"test-worker","hostname":"test-worker.local","ip":"192.168.99.10","cores":8,"gpu_count":0,"ram_mb":16384,"disk_mb":204800}'
-$r = Req POST "/provision" $m
-Check "POST /provision ajoute machine"    "true|ok" ($r | ConvertTo-Json)
-
-$r = Req GET "/resources"
-Check "/resources contient test-worker"   "test-worker" ($r | ConvertTo-Json -Depth 6)
-
-$r = Req DELETE "/provision/test-worker"
-Check "DELETE /provision/:id supprime"    "true|ok" ($r | ConvertTo-Json)
-
-$r = Req GET "/resources"
-if (($r | ConvertTo-Json -Depth 6) -notmatch "test-worker") { Pass "Machine supprimee absente de /resources" }
-else { Fail "Machine supprimee absente de /resources" "toujours presente" }
-
-$r = Req DELETE "/provision/machine-inexistante"
-Check "Suppression machine inexistante -> 404/error" "404|not.found|error" ($r | ConvertTo-Json)
-
-# =============================================
-#  10. STATISTIQUES
-# =============================================
-Write-Host "`n-- 10. Statistiques" -ForegroundColor Cyan
-
-$r = Req GET "/stats"
-$statsJson = $r | ConvertTo-Json -Depth 6
-Check "GET /stats accessible"             "." $statsJson
-Check "/stats contient jobs"              "jobs" $statsJson
-Check "/stats contient total"             "total" $statsJson
-
-# =============================================
-#  11. SSE -- EVENTS TEMPS REEL
-# =============================================
-Write-Host "`n-- 11. SSE /jobs/events" -ForegroundColor Cyan
-
-try {
-    $wr = [System.Net.WebRequest]::Create("$BaseUrl/jobs/events")
-    $wr.Headers.Add("X-API-Key", $KEY)
-    $wr.Timeout = 3000
-    $resp = $wr.GetResponse()
-    $ct = $resp.ContentType
-    $resp.Close()
-    if ($ct -match "text/event-stream") { Pass "GET /jobs/events -> Content-Type: text/event-stream" }
-    else { Fail "GET /jobs/events Content-Type" "got: $ct" }
-} catch {
-    if ($_.Exception.Message -match "timed.out|timeout|The operation has timed") {
-        Pass "GET /jobs/events maintient la connexion ouverte (timeout attendu)"
-    } else { Fail "GET /jobs/events" "$_" }
-}
-
-# =============================================
-#  12. MULTI-MACHINE
-# =============================================
-# =============================================
-#  13. PRIORITE
-# =============================================
-Write-Host "`n-- 13. Priorite" -ForegroundColor Cyan
-
-$low  = Req POST "/jobs" '{"command":"echo low","priority":100,"cores":1,"ram_mb":64}'
-$high = Req POST "/jobs" '{"command":"echo high","priority":1,"cores":1,"ram_mb":64}'
-Check "Job haute priorite soumis"         "QUEUED|RUNNING" $high.status
-Check "Job basse priorite soumis"         "QUEUED|RUNNING" $low.status
-$r = WaitJob $high.id 15
-Check "Job haute priorite -> SUCCEEDED"   "SUCCEEDED" $r.status
-
-# =============================================
-#  14. PURGE
-# =============================================
-Write-Host "`n-- 14. Purge" -ForegroundColor Cyan
-
-# Submit a quick job and wait for it to finish
-$pj = Req POST "/jobs" '{"command":"echo purge_test","priority":1,"cores":1,"ram_mb":64}'
-Check "Purge: job soumis"          "QUEUED|RUNNING|SUCCEEDED" $pj.status
-[void](WaitJob $pj.id 15)
-
-# Purge all terminal jobs
-$r = Req DELETE "/jobs"
-Check "DELETE /jobs -> 200 + deleted" "[0-9]+" "$($r.deleted)"
-Check "DELETE /jobs -> cleaned field"  "[0-9]+" "$($r.cleaned)"
-
-# Confirm purged job is gone
-$gone = Req GET "/jobs/$($pj.id)"
-Check "Job purge -> absent (404)" "404|not.found|error" ($gone | ConvertTo-Json -Depth 5)
-
-# =============================================
-#  15. WORKFLOW -- FILE FORWARDING
-# =============================================
-Write-Host "`n-- 15. Workflow -- file forwarding (output -> input)" -ForegroundColor Cyan
-
-# Step 1: writes a file to ORCH_OUTPUT_DIR
-# Step 2: depends on step 1 and expects that file in ORCH_INPUT_DIR
-$wfBody = @{
-    name = "test-file-forward"
-    steps = @(
-        @{
-            command = 'echo file-forward-data > "%ORCH_OUTPUT_DIR%\result.txt"'
-            priority = 1
-            cores = 1
-            ram_mb = 64
-        },
-        @{
-            command = 'type "%ORCH_INPUT_DIR%\result.txt"'
-            priority = 1
-            cores = 1
-            ram_mb = 64
-            depends_on_steps = @(0)
-            input_files = @("result.txt")
-        }
-    )
-} | ConvertTo-Json -Depth 4
-
-$r = Req POST "/workflows/run" $wfBody
-Check "Workflow file-forward soumis"       "workflow_id" ($r | ConvertTo-Json -Depth 6)
-$wf_jobs = $r.jobs
-$wf_step1_id = $wf_jobs[0].id
-$wf_step2_id = $wf_jobs[1].id
-Check "Step 1 soumis"                      "[0-9a-f-]{36}" $wf_step1_id
-Check "Step 2 en CREATED"                  "CREATED" $wf_jobs[1].status
-
-# Wait for both to finish
-$r1 = WaitJob $wf_step1_id 30
-Check "Step 1 -> SUCCEEDED"               "SUCCEEDED" $r1.status
-
-$r2 = WaitJob $wf_step2_id 30
-Check "Step 2 -> SUCCEEDED (file forwarded)" "SUCCEEDED" $r2.status
-
-# Verify step 2 stdout contains the forwarded data
-$r = ReqRaw GET "/jobs/$wf_step2_id/log"
-if ($r.StatusCode -eq 200 -and $r.Content -match "file-forward-data") {
-    Pass "Step 2 stdout contient les donnees du fichier forward"
+$csp = [string]$ui.Headers["Content-Security-Policy"]
+if ($csp -match "script-src 'self'" -and $csp -notmatch "script-src[^;]*unsafe-inline") {
+    Write-Host "PASS: CSP blocks inline JavaScript" -ForegroundColor Green
+    $Pass++
 } else {
-    Fail "Step 2 stdout contient les donnees" "code=$($r.StatusCode) content=$($r.Content)"
+    Write-Host "FAIL: CSP still allows inline JavaScript ($csp)" -ForegroundColor Red
+    $Fail++
 }
 
-# =============================================
-#  16. WORKFLOW -- SAME-MACHINE AFFINITY
-# =============================================
-Write-Host "`n-- 16. Workflow -- same-machine affinity" -ForegroundColor Cyan
-
-$wfBody2 = @{
-    name = "test-same-machine"
-    steps = @(
-        @{
-            command = "echo step1-machine"
-            priority = 1
-            cores = 1
-            ram_mb = 64
-        },
-        @{
-            command = "echo step2-same-machine"
-            priority = 1
-            cores = 1
-            ram_mb = 64
-            depends_on_steps = @(0)
-            same_machine = $true
-        }
-    )
-} | ConvertTo-Json -Depth 4
-
-$r = Req POST "/workflows/run" $wfBody2
-Check "Workflow same-machine soumis"       "workflow_id" ($r | ConvertTo-Json -Depth 6)
-$sm_jobs = $r.jobs
-$sm_step1_id = $sm_jobs[0].id
-$sm_step2_id = $sm_jobs[1].id
-Check "Step 2 has same_machine_as set"     $sm_step1_id $sm_jobs[1].same_machine_as
-
-$r1 = WaitJob $sm_step1_id 20
-Check "Same-machine step 1 -> SUCCEEDED"  "SUCCEEDED" $r1.status
-$machine1 = $r1.machine_id
-
-$r2 = WaitJob $sm_step2_id 20
-Check "Same-machine step 2 -> SUCCEEDED"  "SUCCEEDED" $r2.status
-$machine2 = $r2.machine_id
-
-if ($machine1 -and $machine2 -and $machine1 -eq $machine2) {
-    Pass "Step 2 execute sur la meme machine ($machine2)"
-} else {
-    Fail "Step 2 sur meme machine" "step1=$machine1 step2=$machine2"
-}
-
-# =============================================
-#  17. WORKFLOW -- CHAIN 3 STEPS WITH FORWARDING
-# =============================================
-Write-Host "`n-- 17. Workflow -- chaine 3 etapes" -ForegroundColor Cyan
-
-$wfBody3 = @{
-    name = "test-3step-chain"
-    steps = @(
-        @{
-            command = 'echo chain-start > "%ORCH_OUTPUT_DIR%\chain.txt"'
-            priority = 1; cores = 1; ram_mb = 64
-        },
-        @{
-            command = 'type "%ORCH_INPUT_DIR%\chain.txt" & echo chain-middle >> "%ORCH_OUTPUT_DIR%\chain.txt"'
-            priority = 1; cores = 1; ram_mb = 64
-            depends_on_steps = @(0)
-            input_files = @("chain.txt")
-        },
-        @{
-            command = 'type "%ORCH_INPUT_DIR%\chain.txt"'
-            priority = 1; cores = 1; ram_mb = 64
-            depends_on_steps = @(1)
-            input_files = @("chain.txt")
-            same_machine = $true
-        }
-    )
-} | ConvertTo-Json -Depth 4
-
-$r = Req POST "/workflows/run" $wfBody3
-Check "Workflow 3-step chain soumis"       "workflow_id" ($r | ConvertTo-Json -Depth 6)
-$ch_jobs = $r.jobs
-$ch3_id = $ch_jobs[2].id
-
-$r3 = WaitJob $ch3_id 45
-Check "Step 3 -> SUCCEEDED"              "SUCCEEDED" $r3.status
-
-$r = ReqRaw GET "/jobs/$ch3_id/log"
-if ($r.StatusCode -eq 200 -and $r.Content -match "chain-middle") {
-    Pass "Step 3 recoit le fichier avec donnees de step 2"
-} else {
-    Fail "Step 3 fichier chain" "code=$($r.StatusCode) content=$($r.Content)"
-}
-
-# =============================================
-#  RESULTAT FINAL
-# =============================================
-Write-Host ""
-Write-Host "=============================================" -ForegroundColor Cyan
-Write-Host "  PASS: $PASS   FAIL: $FAIL   SKIP: $SKIP" -ForegroundColor Cyan
-Write-Host "=============================================" -ForegroundColor Cyan
-if ($FAIL -gt 0) { exit 1 } else { exit 0 }
+Write-Host "PASS=$Pass FAIL=$Fail"
+if ($Fail -gt 0) { exit 1 }

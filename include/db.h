@@ -20,7 +20,7 @@ int db_open(const char *path);
 void db_close(void);
 int db_begin(void);
 int db_commit(void);
-void db_rollback(void);
+int db_rollback(void);
 
 /* ── Jobs ──────────────────────────────────────── */
 int db_insert_job(const Job *job);
@@ -31,6 +31,12 @@ int db_update_job_started(const char *job_id, const char *machine_id,
                            time_t started_at);
 Job *db_get_job(const char *job_id);
 int  db_list_jobs(Job *jobs, int max_count);
+int  db_query_jobs(const char *user_id, int status, const char *app_id,
+                   int limit, int offset, Job **out_jobs);
+int  db_get_submission_job(const char *user_id, const char *idempotency_key,
+                           char *out_job_id, int out_len);
+int  db_store_submission_key(const char *user_id, const char *idempotency_key,
+                             const char *job_id);
 int  db_list_held_jobs(Job *jobs, int max_count);
 int  db_list_running_jobs(Job *jobs, int max_count);
 int  db_list_queued_jobs(Job *jobs, int max_count, int offset);
@@ -76,6 +82,9 @@ typedef struct {
    tuple is stable, so repeated collection after a restart is idempotent. */
 int db_upsert_artifact(ArtifactRecord *artifact);
 int db_list_artifacts(const char *job_id, ArtifactRecord *out, int max_count);
+int  db_load_jobs_by_status(JobStatus status, Job **out_jobs);
+/* Reconcile interrupted jobs and allocations; returns affected job count, -1 on error. */
+int  db_recover_after_restart(void);
 
 int  db_insert_api_key(const char *key_hash, const char *label);
 int  db_insert_api_key_ex(const char *key_hash, const char *label,
@@ -163,6 +172,7 @@ int db_update_input_files(const char *job_id, const char *input_files);int  db_u
 int db_update_depends_on(const char *job_id, const char *depends_on);
 int db_update_workflow_id(const char *job_id, const char *workflow_id);
 int db_update_same_machine_as(const char *job_id, const char *ref_id);
+int db_update_job_submission(const Job *job);
 /* Check all dependency job statuses.
    Returns: 0 = all SUCCEEDED, 1 = still waiting, -1 = a dep FAILED/CANCELLED */
 int db_check_deps_status(const char *depends_on_csv);

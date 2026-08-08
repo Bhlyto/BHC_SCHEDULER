@@ -72,6 +72,8 @@ int main(void)
     if (db_open("scale_test.db") != 0 ||
         registry_load("scale_workers.json") != 1)
         return 1;
+    if (registry_update_probe("local-scale", MACHINE_ONLINE, time(NULL), 1) != 0)
+        return 1;
 
     BatchRecord batch;
     memset(&batch, 0, sizeof(batch));
