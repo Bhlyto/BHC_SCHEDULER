@@ -12,6 +12,7 @@ A lightweight daemon written in C that exposes a REST API for submitting, tracki
 - **Resource-aware allocation** — jobs declare `req_cores`, `req_gpu`, `req_ram_mb`, `req_disk_mb`; the allocator matches them against available capacity
 - **Multi-worker batches** — every job runs on exactly one compatible worker; large batches are distributed across the worker pool
 - **Machine pools** — define hundreds of machines compactly in `provisioning.json` using prefix/format ranges; add or remove machines at runtime without restart
+- **Agentless workers** — run locally or push jobs to a small heterogeneous worker pool over SSH, with scheduler-owned resource state and availability probes
 - **Application definitions** — define apps as JSON files with pre-set resource requirements and dynamic form fields; users pick an app when submitting a job
 - **Artifact metadata** — persist URIs and sizes for stdout, stderr, and recursively collected output files without turning the scheduler into a storage system
 - **HELD jobs** — submit a job with expected input files; it stays in `HELD` state until all files are uploaded, then auto-releases to the queue

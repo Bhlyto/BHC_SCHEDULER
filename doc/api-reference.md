@@ -126,9 +126,10 @@ GET /jobs/:id
 
 ### Cancel a job
 ```http
-DELETE /jobs/:id
+POST /jobs/:id/cancel
 ```
 Returns the updated job object. Returns `409` if the job is already in a terminal state.
+`DELETE /jobs/:id` remains a compatibility alias.
 
 ---
 
@@ -172,6 +173,10 @@ GET /jobs/:id/log
 ```http
 GET /jobs/:id/log/stderr
 ```
+
+The canonical v1 aliases are `GET /jobs/:id/logs` and
+`GET /jobs/:id/logs/stderr`. The singular routes remain available during the
+v1 migration.
 
 Both return `text/plain`. Returns `404` if the log file does not exist yet.
 
@@ -285,11 +290,26 @@ Returns `total`, `created`, `queued`, `running`, `succeeded`, `failed`,
 `cancelled`, `completed`, and a `progress` value between 0 and 1. Batch state
 is derived from its jobs; it is not a separate workflow state machine.
 
-## Resources
+## Queue
+
+```http
+GET /queue?limit=100
+```
+
+Returns queued jobs in deterministic dispatch order: priority, submission
+time, then job ID. `limit` is between 1 and 1000. Non-admin users only see
+their own jobs.
+
+## Workers
+
+Workers are deliberately agentless in v1. The scheduler owns their resource
+state, probes availability, transfers files, and launches remote commands over
+SSH. One job runs on exactly one worker; distribution happens by assigning the
+jobs of a batch across the pool.
 
 ### List machines
 ```http
-GET /resources
+GET /workers
 ```
 
 Response — array of machine objects:
@@ -311,6 +331,27 @@ Response — array of machine objects:
   }
 ]
 ```
+
+### Register or update a worker (admin)
+
+```http
+POST /workers
+Content-Type: application/json
+
+{
+  "id": "worker-01",
+  "hostname": "worker-01.local",
+  "cores": 32,
+  "gpu_count": 1,
+  "ram_mb": 131072,
+  "disk_mb": 1048576,
+  "enabled": true
+}
+```
+
+Use `DELETE /workers/:id` to remove a runtime registration. Static workers
+should normally be declared in `provisioning.json`. The legacy `/resources`
+and `/provision` routes remain temporary compatibility aliases.
 
 ---
 

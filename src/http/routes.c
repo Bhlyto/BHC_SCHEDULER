@@ -39,7 +39,8 @@
  *   GET    /jobs/:id/output/:filename → download_output
  *   GET    /jobs/:id/log              → get_job_log  (stdout.log)
  *   GET    /jobs/:id/log/stderr       → get_job_log_err (stderr.log)
- *   GET    /resources                 → get_resources
+ *   GET    /workers                   → list_workers
+ *   GET    /queue                     → list_queue
  *   GET    /stats                     → get_stats
  *   POST   /provision                 → add_machine
  *   DELETE /provision/:id             → remove_machine
@@ -1349,6 +1350,43 @@ static void list_jobs(struct mg_connection *c, struct mg_http_message *hm,
     cJSON_Delete(arr);
 }
 
+static void list_queue(struct mg_connection *c, struct mg_http_message *hm,
+                       const char *auth_user_id, const char *auth_role)
+{
+    int limit = 100;
+    char value[32];
+    if (mg_http_get_var(&hm->query, "limit", value, sizeof(value)) > 0)
+        limit = clamp_int(atof(value), 1, 1000);
+
+    Job *jobs = (Job *)calloc(1000, sizeof(Job));
+    if (!jobs) { http_error(c, 500, "Out of memory"); return; }
+    int count = db_list_queued_jobs(jobs, 1000, 0);
+    int is_admin = strcmp(auth_role, "admin") == 0;
+    int visible = 0;
+    cJSON *array = cJSON_CreateArray();
+    for (int i = 0; i < count && visible < limit; i++) {
+        if (!is_admin && strcmp(jobs[i].user_id, auth_user_id) != 0) continue;
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddNumberToObject(item, "position", visible + 1);
+        cJSON_AddStringToObject(item, "id", jobs[i].id);
+        cJSON_AddStringToObject(item, "batch_id", jobs[i].batch_id);
+        cJSON_AddStringToObject(item, "status", job_status_str(jobs[i].status));
+        cJSON_AddNumberToObject(item, "priority", jobs[i].priority);
+        cJSON_AddNumberToObject(item, "submitted_at", (double)jobs[i].submitted_at);
+        cJSON_AddNumberToObject(item, "req_cores", jobs[i].req_cores);
+        cJSON_AddNumberToObject(item, "req_gpu", jobs[i].req_gpu);
+        cJSON_AddNumberToObject(item, "req_ram_mb", jobs[i].req_ram_mb);
+        cJSON_AddItemToArray(array, item);
+        visible++;
+    }
+    free(jobs);
+    char *json = cJSON_PrintUnformatted(array);
+    cJSON_Delete(array);
+    if (!json) { http_error(c, 500, "Failed to encode queue"); return; }
+    http_json_reply(c, 200, json);
+    free(json);
+}
+
 static void get_job(struct mg_connection *c, struct mg_http_message *hm,
                     const char *job_id)
 {
@@ -1740,7 +1778,7 @@ static void get_stats(struct mg_connection *c, struct mg_http_message *hm)
     cJSON_Delete(root);
 }
 
-static void get_resources(struct mg_connection *c, struct mg_http_message *hm)
+static void list_workers(struct mg_connection *c, struct mg_http_message *hm)
 {
     (void)hm;
     int count;
@@ -1752,6 +1790,10 @@ static void get_resources(struct mg_connection *c, struct mg_http_message *hm)
         cJSON_AddStringToObject(m, "hostname", ms[i].hostname);
         cJSON_AddStringToObject(m, "ip",       ms[i].ip);
         cJSON_AddBoolToObject  (m, "enabled",  ms[i].enabled);
+        cJSON_AddStringToObject(m, "status",
+            ms[i].probe_status == MACHINE_ONLINE ? "online" :
+            ms[i].probe_status == MACHINE_PROBING ? "probing" : "offline");
+        cJSON_AddNumberToObject(m, "last_seen_at", (double)ms[i].last_probe_time);
         cJSON_AddNumberToObject(m, "cores_total",     ms[i].cores_total);
         cJSON_AddNumberToObject(m, "cores_reserved",  ms[i].cores_reserved);
         cJSON_AddNumberToObject(m, "gpu_total",       ms[i].gpu_count_total);
@@ -2925,6 +2967,9 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
             if (strcmp(method, "DELETE") == 0 && seg[2][0] == '\0') {
                 cancel_job(c, hm, seg[1]); return;
             }
+            if (strcmp(method, "POST") == 0 && strcmp(seg[2], "cancel") == 0 && seg[3][0] == '\0') {
+                cancel_job(c, hm, seg[1]); return;
+            }
             if (strcmp(method, "POST") == 0 && strcmp(seg[2], "release") == 0 && seg[3][0] == '\0') {
                 release_job(c, hm, seg[1]); return;
             }
@@ -2946,7 +2991,14 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
             if (strcmp(method, "GET") == 0 && strcmp(seg[2], "log") == 0) {
                 get_job_log(c, hm, seg[1], strcmp(seg[3], "stderr") == 0); return;
             }
+            if (strcmp(method, "GET") == 0 && strcmp(seg[2], "logs") == 0) {
+                get_job_log(c, hm, seg[1], strcmp(seg[3], "stderr") == 0); return;
+            }
         }
+    }
+
+    if (strcmp(seg[0], "queue") == 0 && strcmp(method, "GET") == 0 && seg[1][0] == '\0') {
+        list_queue(c, hm, auth_user_id, auth_role); return;
     }
 
     /* /apps — available to all authenticated users */
@@ -2993,8 +3045,25 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
         }
     }
 
+    if (strcmp(seg[0], "workers") == 0) {
+        if (strcmp(method, "GET") == 0 && seg[1][0] == '\0') {
+            list_workers(c, hm); return;
+        }
+        if (strcmp(auth_role, "admin") != 0) {
+            http_error(c, 403, "Forbidden: admin role required"); return;
+        }
+        if (strcmp(method, "POST") == 0 && seg[1][0] == '\0') {
+            add_machine(c, hm); return;
+        }
+        if (strcmp(method, "DELETE") == 0 && seg[1][0] != '\0' && seg[2][0] == '\0') {
+            remove_machine(c, hm, seg[1]); return;
+        }
+        http_error(c, 404, "Not found"); return;
+    }
+
+    /* Legacy v0 route retained during the v1 migration. */
     if (strcmp(seg[0], "resources") == 0 && strcmp(method, "GET") == 0) {
-        get_resources(c, hm); return;
+        list_workers(c, hm); return;
     }
 
     if (strcmp(seg[0], "stats") == 0 && strcmp(method, "GET") == 0) {
