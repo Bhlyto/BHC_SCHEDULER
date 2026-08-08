@@ -15,7 +15,8 @@ void config_defaults(void)
     strncpy(g_config.ssh_remote_work_dir, "/tmp/orch", sizeof(g_config.ssh_remote_work_dir)-1);
     strncpy(g_config.command_mode,       "free",      sizeof(g_config.command_mode)-1);
     strncpy(g_config.log_level,         "info",                       sizeof(g_config.log_level)-1);
-    g_config.web_ui_enabled = 1;
+    g_config.web_ui_enabled = 0;
+    g_config.experimental_features_enabled = 0;
     strncpy(g_config.listen_address, "0.0.0.0", sizeof(g_config.listen_address)-1);
     strncpy(g_config.probe_method, "tcp", sizeof(g_config.probe_method)-1);
     g_config.probe_port        = 22;
@@ -34,7 +35,6 @@ void config_defaults(void)
     strncpy(g_config.db_path,           "orchestrator.db",            sizeof(g_config.db_path)-1);
     strncpy(g_config.apps_dir,          "config/apps",                sizeof(g_config.apps_dir)-1);
     strncpy(g_config.provisioning_json, "config/provisioning.json",   sizeof(g_config.provisioning_json)-1);
-        strncpy(g_config.presim_domains, "thermal", sizeof(g_config.presim_domains)-1);
         g_config.presim_threshold_max = 0.03;
         g_config.presim_refine_multiplier = 0.8;
         g_config.presim_high_multiplier = 2.0;
@@ -97,6 +97,7 @@ int config_load(const char *path)
         else if (strcmp(key, "ssh_shell")              == 0) strncpy(g_config.ssh_shell,             val, sizeof(g_config.ssh_shell)-1);
         else if (strcmp(key, "command_mode")           == 0) strncpy(g_config.command_mode,          val, sizeof(g_config.command_mode)-1);
         else if (strcmp(key, "web_ui_enabled")         == 0) g_config.web_ui_enabled                = atoi(val);
+        else if (strcmp(key, "experimental_features_enabled") == 0) g_config.experimental_features_enabled = atoi(val);
         else if (strcmp(key, "listen_address")         == 0) strncpy(g_config.listen_address,        val, sizeof(g_config.listen_address)-1);
         else if (strcmp(key, "probe_method")           == 0) strncpy(g_config.probe_method,          val, sizeof(g_config.probe_method)-1);
         else if (strcmp(key, "probe_port")             == 0) g_config.probe_port                    = atoi(val);

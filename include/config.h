@@ -27,7 +27,8 @@ typedef struct {
     char command_mode[16];       /* "free" (default) or "app_only" */
 
     /* ── Web UI / Bastion mode ── */
-    int  web_ui_enabled;         /* 1 = serve web UI (default), 0 = API-only bastion */
+    int  web_ui_enabled;         /* 1 = serve legacy UI, 0 = API-only v1 default */
+    int  experimental_features_enabled; /* workflows/cloud/WoL/presim, off in v1 */
     char listen_address[64];     /* bind address, e.g. "0.0.0.0" or "127.0.0.1" */
 
     /* ── Machine probe / availability ── */

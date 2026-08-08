@@ -437,7 +437,8 @@ static void *scheduler_thread(void *arg)
             int has_presim = pf ? (fclose(pf), 1) : 0;
             /* Trigger presim only for configured domains and when presim missing */
             int trigger_presim = 0;
-            if (!has_presim && job->app_id && g_config.presim_domains[0]) {
+            if (g_config.experimental_features_enabled && !has_presim &&
+                job->app_id && g_config.presim_domains[0]) {
                 /* presim_domains is a comma-separated list; match exact domain names */
                 char pd[256]; strncpy(pd, g_config.presim_domains, sizeof(pd)-1); pd[sizeof(pd)-1] = '\0';
                 char *tok = strtok(pd, ",");
@@ -620,7 +621,8 @@ static void *scheduler_thread(void *arg)
 
         if (!can_run) {
             /* ── Auto-provision a cloud machine if enabled ──────── */
-            if (g_config.cloud_auto_provision &&
+            if (g_config.experimental_features_enabled &&
+                g_config.cloud_auto_provision &&
                 g_config.cloud_default_provider[0] &&
                 !auto_prov_already_tried(job->id)) {
                 auto_prov_mark(job->id);

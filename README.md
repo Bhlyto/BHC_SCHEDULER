@@ -1,6 +1,8 @@
 # BHC Scheduler — Job Orchestrator
 
-A lightweight daemon written in C that exposes a REST API for submitting, tracking, and cancelling jobs across a pool of machines. Built on [Mongoose](https://mongoose.ws/) (HTTP/SSE), SQLite (persistence), and cJSON. Includes a built-in **web UI** for managing jobs, users, quotas, and applications from the browser.
+A lightweight C daemon for submitting batches, scheduling resource-aware jobs
+across a small worker pool, and collecting results. The v1 default is API-only
+and uses Mongoose, SQLite, cJSON, SSH, and a filesystem artifact backend.
 
 ---
 
@@ -13,28 +15,26 @@ A lightweight daemon written in C that exposes a REST API for submitting, tracki
 - **Multi-worker batches** — every job runs on exactly one compatible worker; large batches are distributed across the worker pool
 - **Machine pools** — define hundreds of machines compactly in `provisioning.json` using prefix/format ranges; add or remove machines at runtime without restart
 - **Agentless workers** — run locally or push jobs to a small heterogeneous worker pool over SSH, with scheduler-owned resource state and availability probes
-- **Application definitions** — define apps as JSON files with pre-set resource requirements and dynamic form fields; users pick an app when submitting a job
 - **Artifact metadata** — persist URIs and sizes for stdout, stderr, and recursively collected output files without turning the scheduler into a storage system
 - **CREATED jobs** — submit expected input files; the job stays `CREATED` until inputs arrive, then moves to `QUEUED`
 - **Job logs** — stdout and stderr of each job are captured and retrievable via API
 - **Pre-job scripts** — run a setup script before each job; receives job context via environment variables
 - **Real-time events** — subscribe to a Server-Sent Events (SSE) stream for live job state updates and an initial snapshot
-- **Event persistence & reporting** — all system events (dispatches, cloud operations, status changes) are logged to the database with full reporting queries (per-user, per-app, per-machine, jobs over time)
+- **Event persistence** — status and dispatch events are recorded for diagnosis
 - **Stats endpoint** — aggregated view of job counts by state and cluster resource utilisation
 - **User management** — create, update, and delete users with password authentication via admin API
 - **Password authentication** — users log in with user ID and password; receive a temporary API key
 - **API key management** — create, list, and revoke API keys; bind keys to users with role-based access (admin/user)
 - **Quotas** — enforce per-user and per-app limits on job count, RAM, cores, and concurrent jobs
-- **Web UI** — built-in single-page application with dark theme; dashboard, job management, reporting charts, machine status grid, and admin panels
-- **Bastion mode** — disable the web UI entirely (`web_ui_enabled = 0`) while keeping the REST API accessible; useful for headless or API-only deployments
 - **Machine availability probing** — background thread checks whether static machines are reachable via TCP, ping, or SSH; offline machines are automatically excluded from scheduling
-- **Cloud provisioning** — provision and deprovision VMs on AWS, GCP, and Azure on-demand via their CLI tools; instances are auto-registered in the machine pool
-- **Cloud auto-scaling** — automatically spin up a cloud VM when no machine can satisfy a job’s requirements, and tear it down when the job finishes
-- **Wake-on-LAN** — send WoL magic packets to power on on-premise machines remotely; triggered via API or the web UI
 - **Auto-cleanup** — work directories are deleted automatically after a configurable TTL
 - **Bulk purge** — single call to delete all finished/failed/cancelled jobs and their work directories
 - **Cross-platform** — runs as a Windows Service or Linux daemon
- - **Presimulation (presim) workflow** — pluggable presim solvers (Python/OpenFOAM), a decision-core abstraction for refinement decisions, and a calibration harness to tune presim parameters for speed vs accuracy tradeoffs
+
+The legacy web UI, saved workflows, cloud/Wake-on-LAN controls, and
+presimulation hooks are compiled for migration compatibility but disabled by
+default. They are not part of the v1 support contract. See
+[V1 scope and decisions](doc/v1-scope.md).
 
 ---
 
@@ -91,6 +91,7 @@ cmake --build build
 | [Web UI](doc/web-ui.md) | Built-in browser interface — tabs, job submission, auto-refresh |
 | [PowerShell Examples](doc/examples.md) | Copy-paste examples for every API endpoint |
 | [Project Structure](doc/architecture.md) | Source tree and module overview |
+| [V1 Scope and Decisions](doc/v1-scope.md) | Supported architecture, deferred features, migration rationale, and release gates |
 | [Presimulation Design & Tools](doc/presim.md) | Presim contract, solver integration, OpenFOAM wrapper, calibration harness, and tooling (`tools/presim_calibrate.py`, `tools/openfoam_presim_wrapper.sh`) |
 
 Other useful scripts:

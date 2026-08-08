@@ -2973,6 +2973,9 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
 
     /* Admin: presim config endpoints */
     if (strcmp(seg[0], "admin") == 0 && strcmp(seg[1], "presim-config") == 0) {
+        if (!g_config.experimental_features_enabled) {
+            http_error(c, 404, "Experimental feature disabled"); return;
+        }
         if (strcmp(method, "GET") == 0) { admin_get_presim_config(c, hm); return; }
         if (strcmp(method, "POST") == 0) { admin_update_presim_config(c, hm); return; }
         http_error(c, 404, "Not found"); return;
@@ -3074,6 +3077,9 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
 
     /* /workflows — saved workflow templates + submit */
     if (strcmp(seg[0], "workflows") == 0) {
+        if (!g_config.experimental_features_enabled) {
+            http_error(c, 404, "Experimental feature disabled"); return;
+        }
         if (strcmp(method, "GET") == 0 && seg[1][0] == '\0') {
             list_saved_workflows(c, auth_user_id, auth_role); return;
         }
@@ -3223,6 +3229,9 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
 
     /* /admin/cloud — cloud provisioning */
     if (strcmp(seg[0], "admin") == 0 && strcmp(seg[1], "cloud") == 0) {
+        if (!g_config.experimental_features_enabled) {
+            http_error(c, 404, "Experimental feature disabled"); return;
+        }
         if (strcmp(method, "POST") == 0 && strcmp(seg[2], "provision") == 0) {
             admin_cloud_provision(c, hm); return;
         }
@@ -3233,6 +3242,9 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
 
     /* /admin/wol — Wake-on-LAN */
     if (strcmp(seg[0], "admin") == 0 && strcmp(seg[1], "wol") == 0) {
+        if (!g_config.experimental_features_enabled) {
+            http_error(c, 404, "Experimental feature disabled"); return;
+        }
         if (strcmp(method, "POST") == 0) {
             admin_wol(c, hm); return;
         }
