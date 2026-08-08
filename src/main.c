@@ -5,6 +5,8 @@
 #include "resources.h"
 #include "scheduler.h"
 #include "http.h"
+#include "executor.h"
+#include "events.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -59,6 +61,7 @@ void orchestrator_run(void)
     else
         log_info("main", "%d machine(s) loaded from %s", machine_count, g_config.provisioning_json);
 
+    events_init();
     scheduler_init();
     scheduler_start();
     log_info("main", "Scheduler started");
@@ -94,6 +97,7 @@ void orchestrator_run(void)
     httpd_stop();
     probe_stop_background();
     scheduler_stop();
+    executor_shutdown();
     db_close();
     log_info("main", "Shutdown complete");
 }

@@ -34,6 +34,8 @@ typedef struct {
 } ActiveProcess;
 
 static ActiveProcess s_active_processes[MAX_ACTIVE_PROCESSES];
+static int s_inflight_jobs = 0;
+static int s_shutting_down = 0;
 
 #ifdef _WIN32
 static SRWLOCK s_active_lock = SRWLOCK_INIT;
@@ -86,6 +88,29 @@ static void active_process_unregister(const char *job_id)
     active_unlock();
 }
 
+static void inflight_increment(void)
+{
+    active_lock();
+    s_inflight_jobs++;
+    active_unlock();
+}
+
+static void inflight_decrement(void)
+{
+    active_lock();
+    if (s_inflight_jobs > 0) s_inflight_jobs--;
+    active_unlock();
+}
+
+static int executor_is_shutting_down(void)
+{
+    int value;
+    active_lock();
+    value = s_shutting_down;
+    active_unlock();
+    return value;
+}
+
 int executor_terminate(const char *job_id)
 {
     int found = 0;
@@ -109,6 +134,42 @@ int executor_terminate(const char *job_id)
     }
     active_unlock();
     return found;
+}
+
+int executor_shutdown(void)
+{
+    active_lock();
+    s_shutting_down = 1;
+    for (int i = 0; i < MAX_ACTIVE_PROCESSES; i++) {
+        ActiveProcess *p = &s_active_processes[i];
+        if (!p->active) continue;
+#ifdef _WIN32
+        if (p->job_object)
+            TerminateJobObject(p->job_object, 1);
+        else if (p->process_handle)
+            TerminateProcess(p->process_handle, 1);
+#else
+        if (p->pid > 0 && kill(-p->pid, SIGTERM) != 0)
+            kill(p->pid, SIGTERM);
+#endif
+    }
+    active_unlock();
+
+    for (int waited_ms = 0; waited_ms < 30000; waited_ms += 50) {
+        int remaining;
+        active_lock();
+        remaining = s_inflight_jobs;
+        active_unlock();
+        if (remaining == 0) return 0;
+#ifdef _WIN32
+        Sleep(50);
+#else
+        usleep(50 * 1000);
+#endif
+    }
+
+    log_error("executor", "Timed out waiting for executor threads to stop");
+    return -1;
 }
 
 static int job_is_terminal_in_db(const char *job_id)
@@ -464,6 +525,7 @@ static DWORD WINAPI watcher_thread(LPVOID arg)
     if (wa->job_object) CloseHandle(wa->job_object);
     job_free(wa->job);
     free(wa);
+    inflight_decrement();
     return 0;
 }
 
@@ -808,9 +870,10 @@ static DWORD WINAPI launcher_thread(LPVOID arg)
     LaunchArg *la = (LaunchArg *)arg;
     Job *job = la->job;
     free(la);
-    if (job_is_terminal_in_db(job->id)) {
+    if (executor_is_shutting_down() || job_is_terminal_in_db(job->id)) {
         alloc_release(job->id);
         job_free(job);
+        inflight_decrement();
         return 0;
     }
     if (spawn_process(job) != 0) {
@@ -821,6 +884,7 @@ static DWORD WINAPI launcher_thread(LPVOID arg)
         }
         alloc_release(job->id);
         job_free(job);
+        inflight_decrement();
         return 1;
     }
     return 0;
@@ -894,6 +958,7 @@ static void *watcher_thread(void *arg)
     if (wa->known_hosts_path[0]) remove(wa->known_hosts_path);
     job_free(wa->job);
     free(wa);
+    inflight_decrement();
     return NULL;
 }
 
@@ -1107,9 +1172,10 @@ static void *launcher_thread(void *arg)
     LaunchArg *la = (LaunchArg *)arg;
     Job *job = la->job;
     free(la);
-    if (job_is_terminal_in_db(job->id)) {
+    if (executor_is_shutting_down() || job_is_terminal_in_db(job->id)) {
         alloc_release(job->id);
         job_free(job);
+        inflight_decrement();
         return NULL;
     }
     if (spawn_process(job) != 0) {
@@ -1120,6 +1186,7 @@ static void *launcher_thread(void *arg)
         }
         alloc_release(job->id);
         job_free(job);
+        inflight_decrement();
         return NULL;
     }
     return NULL;
@@ -1130,6 +1197,12 @@ static void *launcher_thread(void *arg)
 /* ── Public API ──────────────────────────────────────────────────── */
 int executor_spawn(Job *job)
 {
+    if (executor_is_shutting_down()) {
+        job_set_status_r(job, JOB_STATUS_FAILED, "Executor is shutting down");
+        alloc_release(job->id);
+        job_free(job);
+        return -1;
+    }
     store_init_job_dirs(job->id);
     store_input_dir (job->id, job->input_dir,  sizeof(job->input_dir));
     store_output_dir(job->id, job->output_dir, sizeof(job->output_dir));
@@ -1148,6 +1221,7 @@ int executor_spawn(Job *job)
         return -1;
     }
     la->job = job;
+    inflight_increment();
 
 #ifdef _WIN32
     HANDLE th = CreateThread(NULL, 0, launcher_thread, la, 0, NULL);
@@ -1156,6 +1230,7 @@ int executor_spawn(Job *job)
         job_set_status_r(job, JOB_STATUS_FAILED, "Failed to create launcher thread");
         alloc_release(job->id);
         job_free(job);
+        inflight_decrement();
         return -1;
     }
     CloseHandle(th);
@@ -1166,6 +1241,7 @@ int executor_spawn(Job *job)
         job_set_status_r(job, JOB_STATUS_FAILED, "Failed to create launcher thread");
         alloc_release(job->id);
         job_free(job);
+        inflight_decrement();
         return -1;
     }
     pthread_detach(th);

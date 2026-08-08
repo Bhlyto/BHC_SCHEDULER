@@ -9,4 +9,8 @@ int executor_spawn(Job *job);
    process was found, 0 when the job has not started or already exited. */
 int executor_terminate(const char *job_id);
 
+/* Stop accepting launches, terminate active process trees and wait for all
+   launcher/watcher threads to finish. Returns 0 on clean shutdown. */
+int executor_shutdown(void);
+
 #endif /* EXECUTOR_H */

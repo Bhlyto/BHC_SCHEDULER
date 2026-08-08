@@ -117,6 +117,11 @@ int main(void)
         fprintf(stderr, "cancelled process produced its marker\n");
     }
 
+    if (executor_shutdown() != 0) {
+        fprintf(stderr, "executor shutdown did not drain its threads\n");
+        ok = 0;
+    }
+
     db_close();
     remove_test_files();
     return ok ? 0 : 1;

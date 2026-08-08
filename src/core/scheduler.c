@@ -31,11 +31,18 @@ static void trim_local(char *s)
 #  define sleep_ms(ms) Sleep(ms)
 #else
 #  include <unistd.h>
+#  include <pthread.h>
 #  define sleep_ms(ms) usleep((ms) * 1000)
 #endif
 
 static Queue *s_queue    = NULL;
 static int    s_running  = 0;
+#ifdef _WIN32
+static HANDLE s_scheduler_thread = NULL;
+#else
+static pthread_t s_scheduler_thread;
+static int s_scheduler_thread_started = 0;
+#endif
 
 /* ── Auto-provision rate limiter: track job IDs that already triggered ──── */
 #define AUTO_PROV_MAX 256
@@ -743,12 +750,13 @@ void scheduler_start(void)
 {
     s_running = 1;
 #ifdef _WIN32
-    HANDLE th = CreateThread(NULL, 0, scheduler_thread, NULL, 0, NULL);
-    if (th) CloseHandle(th);
+    s_scheduler_thread = CreateThread(NULL, 0, scheduler_thread, NULL, 0, NULL);
+    if (!s_scheduler_thread) s_running = 0;
 #else
-    pthread_t th;
-    pthread_create(&th, NULL, scheduler_thread, NULL);
-    pthread_detach(th);
+    if (pthread_create(&s_scheduler_thread, NULL, scheduler_thread, NULL) == 0)
+        s_scheduler_thread_started = 1;
+    else
+        s_running = 0;
 #endif
 }
 
@@ -756,6 +764,24 @@ void scheduler_stop(void)
 {
     s_running = 0;
     if (s_queue) queue_shutdown(s_queue);
+#ifdef _WIN32
+    if (s_scheduler_thread) {
+        WaitForSingleObject(s_scheduler_thread, INFINITE);
+        CloseHandle(s_scheduler_thread);
+        s_scheduler_thread = NULL;
+    }
+#else
+    if (s_scheduler_thread_started) {
+        pthread_join(s_scheduler_thread, NULL);
+        s_scheduler_thread_started = 0;
+    }
+#endif
+    if (s_queue) {
+        Job *job;
+        while ((job = queue_try_pop(s_queue)) != NULL) job_free(job);
+        queue_destroy(s_queue);
+        s_queue = NULL;
+    }
     /* Shutdown decision core */
     decision_core_shutdown();
 }
