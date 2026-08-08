@@ -41,11 +41,18 @@ static void heap_swap(Queue *q, int a, int b)
     Job *tmp = q->heap[a]; q->heap[a] = q->heap[b]; q->heap[b] = tmp;
 }
 
+static int job_before(const Job *a, const Job *b)
+{
+    if (a->priority != b->priority) return a->priority < b->priority;
+    if (a->submitted_at != b->submitted_at) return a->submitted_at < b->submitted_at;
+    return strcmp(a->id, b->id) < 0;
+}
+
 static void heap_up(Queue *q, int i)
 {
     while (i > 0) {
         int parent = (i - 1) / 2;
-        if (q->heap[parent]->priority <= q->heap[i]->priority) break;
+        if (!job_before(q->heap[i], q->heap[parent])) break;
         heap_swap(q, parent, i);
         i = parent;
     }
@@ -57,8 +64,8 @@ static void heap_down(Queue *q, int i)
     while (1) {
         int smallest = i;
         int l = 2*i+1, r = 2*i+2;
-        if (l < n && q->heap[l]->priority < q->heap[smallest]->priority) smallest = l;
-        if (r < n && q->heap[r]->priority < q->heap[smallest]->priority) smallest = r;
+        if (l < n && job_before(q->heap[l], q->heap[smallest])) smallest = l;
+        if (r < n && job_before(q->heap[r], q->heap[smallest])) smallest = r;
         if (smallest == i) break;
         heap_swap(q, i, smallest);
         i = smallest;
@@ -125,6 +132,33 @@ Job *queue_try_pop(Queue *q)
     Job *job = q->heap[0];
     q->heap[0] = q->heap[--q->size];
     if (q->size > 0) heap_down(q, 0);
+    mutex_unlock(&q->lock);
+    return job;
+}
+
+Job *queue_try_pop_matching(Queue *q, QueuePredicate predicate, void *context)
+{
+    if (!predicate) return queue_try_pop(q);
+    mutex_lock(&q->lock);
+    int best = -1;
+    for (int i = 0; i < q->size; i++) {
+        if (!predicate(q->heap[i], context)) continue;
+        if (best < 0 || job_before(q->heap[i], q->heap[best])) best = i;
+    }
+    if (best < 0) {
+        mutex_unlock(&q->lock);
+        return NULL;
+    }
+
+    Job *job = q->heap[best];
+    q->heap[best] = q->heap[--q->size];
+    if (best < q->size) {
+        int parent = (best - 1) / 2;
+        if (best > 0 && job_before(q->heap[best], q->heap[parent]))
+            heap_up(q, best);
+        else
+            heap_down(q, best);
+    }
     mutex_unlock(&q->lock);
     return job;
 }

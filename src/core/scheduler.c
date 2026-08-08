@@ -103,6 +103,15 @@ static int count_present_files(const char *input_dir, const char *input_files)
     return present;
 }
 
+static int job_fits_available_resources(const Job *job, void *context)
+{
+    (void)context;
+    if (alloc_can_fit(job->req_cores, job->req_gpu,
+                      job->req_ram_mb, job->req_disk_mb)) return 1;
+    return alloc_can_fit_multi(job->req_cores, job->req_gpu,
+                               job->req_ram_mb, job->req_disk_mb) > 0;
+}
+
 /* ── Periodic: check all HELD jobs and release those whose files are ready ── */
 static void scheduler_check_held_jobs(void)
 {
@@ -333,7 +342,10 @@ static void *scheduler_thread(void *arg)
             scheduler_check_timeouts();
         }
 
-        Job *job = queue_try_pop(s_queue);
+        /* Prefer the highest-priority job that can run now. If none fits,
+           inspect the queue head so diagnostics and auto-provisioning still run. */
+        Job *job = queue_try_pop_matching(s_queue, job_fits_available_resources, NULL);
+        if (!job) job = queue_try_pop(s_queue);
         if (!job) continue;
 
         /* The database is authoritative. A queued object may be stale when a

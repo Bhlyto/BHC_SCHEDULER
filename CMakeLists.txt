@@ -132,14 +132,23 @@ add_executable(recovery_test
 target_include_directories(recovery_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(recovery_test ${PLATFORM_LIBS})
 
+add_executable(queue_test
+    src/tools/queue_test.c
+    src/core/queue.c
+    src/persistence/log.c
+)
+target_include_directories(queue_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(queue_test ${PLATFORM_LIBS})
+
 if(BUILD_TESTING)
     add_test(NAME decision_core COMMAND $<TARGET_FILE:dc_test>)
     add_test(NAME presim_e2e COMMAND $<TARGET_FILE:presim_e2e_test>)
     add_test(NAME lifecycle COMMAND $<TARGET_FILE:lifecycle_test>)
     add_test(NAME allocator COMMAND $<TARGET_FILE:allocator_test>)
     add_test(NAME recovery COMMAND $<TARGET_FILE:recovery_test>)
+    add_test(NAME queue COMMAND $<TARGET_FILE:queue_test>)
 
-    set_tests_properties(decision_core presim_e2e lifecycle allocator recovery PROPERTIES
+    set_tests_properties(decision_core presim_e2e lifecycle allocator recovery queue PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     )
 endif()
