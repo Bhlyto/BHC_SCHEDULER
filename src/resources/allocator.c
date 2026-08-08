@@ -35,26 +35,56 @@ typedef struct {
 static AllocRecord s_allocs[MAX_ALLOC];
 static int         s_alloc_count = 0;
 
+/* Called with s_lock held. Reuse released records before growing the high
+   water mark so a long-running scheduler is not limited to 1024 total jobs. */
+static AllocRecord *alloc_record_acquire(void)
+{
+    for (int i = 0; i < s_alloc_count; i++)
+        if (!s_allocs[i].active) return &s_allocs[i];
+    if (s_alloc_count >= MAX_ALLOC) return NULL;
+    return &s_allocs[s_alloc_count++];
+}
+
+static int free_cores(const Machine *m)
+{
+    return m->cores_total - m->cores_reserved - m->cores_min;
+}
+
+static int free_ram_mb(const Machine *m)
+{
+    return m->ram_mb_total - m->ram_mb_reserved - m->ram_mb_min;
+}
+
+static int free_disk_mb(const Machine *m)
+{
+    return m->disk_mb_total - m->disk_mb_reserved - m->disk_mb_min;
+}
+
 static int machine_can_fit(const Machine *M,
                             int cores, int gpu, int ram_mb, int disk_mb)
 {
     if (!M->enabled) return 0;
     if (M->probe_status == MACHINE_OFFLINE) return 0;
-    if (M->cores_total     - M->cores_reserved     < cores)   return 0;
+    if (free_cores(M)                                  < cores)   return 0;
     if (M->gpu_count_total - M->gpu_count_reserved < gpu)     return 0;
-    if (M->ram_mb_total    - M->ram_mb_reserved    < ram_mb)  return 0;
-    if (M->disk_mb_total   - M->disk_mb_reserved   < disk_mb) return 0;
+    if (free_ram_mb(M)                                  < ram_mb)  return 0;
+    if (free_disk_mb(M)                                 < disk_mb) return 0;
     return 1;
 }
 
 int alloc_can_fit(int req_cores, int req_gpu, int req_ram_mb, int req_disk_mb)
 {
+    int result = 0;
+    lock_acquire();
     int count;
     Machine *ms = registry_all(&count);
     for (int i = 0; i < count; i++)
-        if (machine_can_fit(&ms[i], req_cores, req_gpu, req_ram_mb, req_disk_mb))
-            return 1;
-    return 0;
+        if (machine_can_fit(&ms[i], req_cores, req_gpu, req_ram_mb, req_disk_mb)) {
+            result = 1;
+            break;
+        }
+    lock_release();
+    return result;
 }
 
 /*
@@ -79,10 +109,10 @@ void alloc_diagnose(int req_cores, int req_gpu, int req_ram_mb, int req_disk_mb,
         Machine *M = &ms[i];
         if (!M->enabled) continue;
         n_enabled++;
-        int fc = M->cores_total     - M->cores_reserved;
+        int fc = free_cores(M);
         int fg = M->gpu_count_total - M->gpu_count_reserved;
-        int fr = M->ram_mb_total    - M->ram_mb_reserved;
-        int fd = M->disk_mb_total   - M->disk_mb_reserved;
+        int fr = free_ram_mb(M);
+        int fd = free_disk_mb(M);
         if (fc > best_free_cores) best_free_cores = fc;
         if (fr > best_free_ram)   best_free_ram   = fr;
         if (fd > best_free_disk)  best_free_disk  = fd;
@@ -130,6 +160,8 @@ int alloc_can_fit_multi(int req_cores, int req_gpu,
 {
     if (req_gpu > 0) return 0; /* GPU jobs cannot span multiple machines */
 
+    int result = 0;
+    lock_acquire();
     int count;
     Machine *ms = registry_all(&count);
 
@@ -138,24 +170,27 @@ int alloc_can_fit_multi(int req_cores, int req_gpu,
     int n_cands = 0;
     int cand_idx[ALLOC_MAX_MACHINES_PER_JOB];
     for (int i = 0; i < count && n_cands < ALLOC_MAX_MACHINES_PER_JOB; i++) {
-        if (!ms[i].enabled) continue;
-        int fc = ms[i].cores_total - ms[i].cores_reserved;
+        if (!ms[i].enabled || ms[i].probe_status == MACHINE_OFFLINE) continue;
+        int fc = free_cores(&ms[i]);
         if (fc <= 0) continue;
         cand_idx[n_cands++] = i;
         total_free_cores += fc;
         if (total_free_cores >= req_cores) break;
     }
-    if (total_free_cores < req_cores) return 0;
+    if (total_free_cores < req_cores) goto done;
 
     /* Pass 2: check RAM/disk split across selected machines */
     int ram_per  = (req_ram_mb  + n_cands - 1) / n_cands;
     int disk_per = (req_disk_mb + n_cands - 1) / n_cands;
     for (int i = 0; i < n_cands; i++) {
         Machine *M = &ms[cand_idx[i]];
-        if ((M->ram_mb_total  - M->ram_mb_reserved)  < ram_per)  return 0;
-        if ((M->disk_mb_total - M->disk_mb_reserved) < disk_per) return 0;
+        if (free_ram_mb(M) < ram_per) goto done;
+        if (free_disk_mb(M) < disk_per) goto done;
     }
-    return n_cands;
+    result = n_cands;
+done:
+    lock_release();
+    return result;
 }
 
 int alloc_reserve_multi(const char *job_id,
@@ -180,8 +215,8 @@ int alloc_reserve_multi(const char *job_id,
     for (int i = 0; i < count && n_slots < ALLOC_MAX_MACHINES_PER_JOB; i++) {
         if (remaining <= 0) break;
         Machine *M = &ms[i];
-        if (!M->enabled) continue;
-        int fc = M->cores_total - M->cores_reserved;
+        if (!M->enabled || M->probe_status == MACHINE_OFFLINE) continue;
+        int fc = free_cores(M);
         if (fc <= 0) continue;
         tmp[n_slots].idx        = i;
         tmp[n_slots].cores_take = (fc < remaining) ? fc : remaining;
@@ -194,36 +229,35 @@ int alloc_reserve_multi(const char *job_id,
     int disk_per = (req_disk_mb + n_slots - 1) / n_slots;
     for (int i = 0; i < n_slots; i++) {
         Machine *M = &ms[tmp[i].idx];
-        if ((M->ram_mb_total  - M->ram_mb_reserved)  < ram_per ||
-            (M->disk_mb_total - M->disk_mb_reserved) < disk_per) {
+        if (free_ram_mb(M) < ram_per || free_disk_mb(M) < disk_per) {
             lock_release(); return -1;
         }
     }
 
     out_machine_ids[0] = '\0';
-    AllocRecord *r = NULL;
-    if (s_alloc_count < MAX_ALLOC) {
-        r = &s_allocs[s_alloc_count++];
-        memset(r, 0, sizeof(*r));
-        strncpy(r->job_id, job_id, sizeof(r->job_id)-1);
-        r->n_slots = n_slots;
-        r->active  = 1;
-    }
+    AllocRecord *r = alloc_record_acquire();
+    if (!r) { lock_release(); return -1; }
+    memset(r, 0, sizeof(*r));
+    strncpy(r->job_id, job_id, sizeof(r->job_id)-1);
+    r->n_slots = n_slots;
+    r->active  = 1;
 
     for (int i = 0; i < n_slots; i++) {
         Machine *M = &ms[tmp[i].idx];
         M->cores_reserved    += tmp[i].cores_take;
         M->ram_mb_reserved   += ram_per;
         M->disk_mb_reserved  += disk_per;
-        if (i > 0) strncat(out_machine_ids, ",", 1023);
-        strncat(out_machine_ids, M->id, 1023);
-        if (r) {
-            strncpy(r->slots[i].machine_id, M->id, sizeof(r->slots[i].machine_id)-1);
-            r->slots[i].cores   = tmp[i].cores_take;
-            r->slots[i].gpu     = 0;
-            r->slots[i].ram_mb  = ram_per;
-            r->slots[i].disk_mb = disk_per;
+        size_t used = strlen(out_machine_ids);
+        if (i > 0 && used < 1023) {
+            strncat(out_machine_ids, ",", 1023 - used);
+            used = strlen(out_machine_ids);
         }
+        if (used < 1023) strncat(out_machine_ids, M->id, 1023 - used);
+        strncpy(r->slots[i].machine_id, M->id, sizeof(r->slots[i].machine_id)-1);
+        r->slots[i].cores   = tmp[i].cores_take;
+        r->slots[i].gpu     = 0;
+        r->slots[i].ram_mb  = ram_per;
+        r->slots[i].disk_mb = disk_per;
     }
     *out_n_machines = n_slots;
 
@@ -264,6 +298,18 @@ int alloc_reserve(const char *job_id,
     }
     if (!chosen) { lock_release(); return -1; }
 
+    AllocRecord *r = alloc_record_acquire();
+    if (!r) { lock_release(); return -1; }
+    memset(r, 0, sizeof(*r));
+    strncpy(r->job_id, job_id, sizeof(r->job_id)-1);
+    r->n_slots = 1;
+    strncpy(r->slots[0].machine_id, chosen->id, sizeof(r->slots[0].machine_id)-1);
+    r->slots[0].cores   = req_cores;
+    r->slots[0].gpu     = req_gpu;
+    r->slots[0].ram_mb  = req_ram_mb;
+    r->slots[0].disk_mb = req_disk_mb;
+    r->active = 1;
+
     chosen->cores_reserved     += req_cores;
     chosen->gpu_count_reserved += req_gpu;
     chosen->ram_mb_reserved    += req_ram_mb;
@@ -271,19 +317,6 @@ int alloc_reserve(const char *job_id,
 
     strncpy(out_machine_id, chosen->id, 63);
     out_machine_id[63] = '\0';
-
-    if (s_alloc_count < MAX_ALLOC) {
-        AllocRecord *r = &s_allocs[s_alloc_count++];
-        memset(r, 0, sizeof(*r));
-        strncpy(r->job_id, job_id, sizeof(r->job_id)-1);
-        r->n_slots = 1;
-        strncpy(r->slots[0].machine_id, chosen->id, sizeof(r->slots[0].machine_id)-1);
-        r->slots[0].cores   = req_cores;
-        r->slots[0].gpu     = req_gpu;
-        r->slots[0].ram_mb  = req_ram_mb;
-        r->slots[0].disk_mb = req_disk_mb;
-        r->active = 1;
-    }
 
     lock_release();
 
@@ -307,23 +340,22 @@ int alloc_reserve_on(const char *job_id,
         return -1;
     }
 
+    AllocRecord *r = alloc_record_acquire();
+    if (!r) { lock_release(); return -1; }
+    memset(r, 0, sizeof(*r));
+    strncpy(r->job_id, job_id, sizeof(r->job_id)-1);
+    r->n_slots = 1;
+    strncpy(r->slots[0].machine_id, m->id, sizeof(r->slots[0].machine_id)-1);
+    r->slots[0].cores   = req_cores;
+    r->slots[0].gpu     = req_gpu;
+    r->slots[0].ram_mb  = req_ram_mb;
+    r->slots[0].disk_mb = req_disk_mb;
+    r->active = 1;
+
     m->cores_reserved     += req_cores;
     m->gpu_count_reserved += req_gpu;
     m->ram_mb_reserved    += req_ram_mb;
     m->disk_mb_reserved   += req_disk_mb;
-
-    if (s_alloc_count < MAX_ALLOC) {
-        AllocRecord *r = &s_allocs[s_alloc_count++];
-        memset(r, 0, sizeof(*r));
-        strncpy(r->job_id, job_id, sizeof(r->job_id)-1);
-        r->n_slots = 1;
-        strncpy(r->slots[0].machine_id, m->id, sizeof(r->slots[0].machine_id)-1);
-        r->slots[0].cores   = req_cores;
-        r->slots[0].gpu     = req_gpu;
-        r->slots[0].ram_mb  = req_ram_mb;
-        r->slots[0].disk_mb = req_disk_mb;
-        r->active = 1;
-    }
 
     lock_release();
 
@@ -347,6 +379,10 @@ int alloc_release(const char *job_id)
                 M->gpu_count_reserved -= r->slots[s].gpu;
                 M->ram_mb_reserved    -= r->slots[s].ram_mb;
                 M->disk_mb_reserved   -= r->slots[s].disk_mb;
+                if (M->cores_reserved < 0) M->cores_reserved = 0;
+                if (M->gpu_count_reserved < 0) M->gpu_count_reserved = 0;
+                if (M->ram_mb_reserved < 0) M->ram_mb_reserved = 0;
+                if (M->disk_mb_reserved < 0) M->disk_mb_reserved = 0;
             }
         }
         r->active = 0;

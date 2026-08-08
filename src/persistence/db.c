@@ -40,14 +40,15 @@ static const char *SCHEMA =
     ");"
 
     "CREATE TABLE IF NOT EXISTS allocations ("
-    "  job_id      TEXT PRIMARY KEY,"
+    "  job_id      TEXT NOT NULL,"
     "  machine_id  TEXT NOT NULL,"
     "  cores       INTEGER NOT NULL DEFAULT 0,"
     "  gpu         INTEGER NOT NULL DEFAULT 0,"
     "  ram_mb      INTEGER NOT NULL DEFAULT 0,"
     "  disk_mb     INTEGER NOT NULL DEFAULT 0,"
     "  allocated_at INTEGER,"
-    "  released_at  INTEGER"
+    "  released_at  INTEGER,"
+    "  PRIMARY KEY (job_id, machine_id)"
     ");"
 
     "CREATE TABLE IF NOT EXISTS audit_log ("
@@ -105,6 +106,48 @@ static const char *SCHEMA =
     "CREATE INDEX IF NOT EXISTS idx_events_cat ON events(category, created_at);"
     "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(created_at);";
 
+static int migrate_allocations_primary_key(void)
+{
+    sqlite3_stmt *st = NULL;
+    int job_pk = 0, machine_pk = 0;
+    if (sqlite3_prepare_v2(s_db, "PRAGMA table_info(allocations);", -1,
+                           &st, NULL) != SQLITE_OK)
+        return -1;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(st, 1);
+        int pk_order = sqlite3_column_int(st, 5);
+        if (name && strcmp(name, "job_id") == 0) job_pk = pk_order;
+        if (name && strcmp(name, "machine_id") == 0) machine_pk = pk_order;
+    }
+    sqlite3_finalize(st);
+    if (job_pk == 1 && machine_pk == 2) return 0;
+
+    const char *sql =
+        "BEGIN IMMEDIATE;"
+        "DROP TABLE IF EXISTS allocations_new;"
+        "CREATE TABLE allocations_new ("
+        " job_id TEXT NOT NULL, machine_id TEXT NOT NULL,"
+        " cores INTEGER NOT NULL DEFAULT 0, gpu INTEGER NOT NULL DEFAULT 0,"
+        " ram_mb INTEGER NOT NULL DEFAULT 0, disk_mb INTEGER NOT NULL DEFAULT 0,"
+        " allocated_at INTEGER, released_at INTEGER,"
+        " PRIMARY KEY(job_id, machine_id));"
+        "INSERT OR REPLACE INTO allocations_new"
+        " SELECT job_id,machine_id,cores,gpu,ram_mb,disk_mb,allocated_at,released_at"
+        " FROM allocations;"
+        "DROP TABLE allocations;"
+        "ALTER TABLE allocations_new RENAME TO allocations;"
+        "COMMIT;";
+    char *errmsg = NULL;
+    if (sqlite3_exec(s_db, sql, NULL, NULL, &errmsg) != SQLITE_OK) {
+        fprintf(stderr, "[db] allocations migration: %s\n",
+                errmsg ? errmsg : "unknown error");
+        sqlite3_free(errmsg);
+        sqlite3_exec(s_db, "ROLLBACK;", NULL, NULL, NULL);
+        return -1;
+    }
+    return 0;
+}
+
 int db_open(const char *path)
 {
     if (sqlite3_open(path, &s_db) != SQLITE_OK) {
@@ -118,6 +161,7 @@ int db_open(const char *path)
         sqlite3_free(errmsg);
         return -1;
     }
+    if (migrate_allocations_primary_key() != 0) return -1;
     /* Migration: ignored on fresh DBs where column already exists */
     sqlite3_exec(s_db,
         "ALTER TABLE jobs ADD COLUMN input_files TEXT NOT NULL DEFAULT '';",
