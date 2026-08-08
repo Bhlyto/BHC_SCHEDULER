@@ -2505,6 +2505,9 @@ static void get_job_log(struct mg_connection *c, struct mg_http_message *hm,
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
         mg_send(c, buf, n);
     fclose(f);
+    /* Manual streaming must mark the response complete so Mongoose can
+     * process the next request on the same HTTP/1.1 keep-alive connection. */
+    c->is_resp = 0;
 }
 
 /* ── List job files (input + output) ─────────────────────────────── */
