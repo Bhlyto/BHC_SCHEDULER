@@ -34,6 +34,7 @@ int  db_list_jobs(Job *jobs, int max_count);
 int  db_list_held_jobs(Job *jobs, int max_count);
 int  db_list_running_jobs(Job *jobs, int max_count);
 int  db_list_queued_jobs(Job *jobs, int max_count, int offset);
+int  db_retry_job(const char *job_id);
 
 /* Mark RUNNING jobs (and legacy pre-v1 STARTING rows) as failed after a
    scheduler restart and release allocations. Returns the recovered count. */

@@ -176,3 +176,16 @@ int store_cleanup_job(const char *job_id)
     log_info("store", "Cleaned up job dir for %s", job_id);
     return 0;
 }
+
+int store_reset_job_outputs(const char *job_id)
+{
+    char path[512];
+    store_output_dir(job_id, path, sizeof(path));
+    rmdir_r(path);
+    make_dir(path);
+    store_stdout_path(job_id, path, sizeof(path));
+    remove(path);
+    store_stderr_path(job_id, path, sizeof(path));
+    remove(path);
+    return 0;
+}

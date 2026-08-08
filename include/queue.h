@@ -12,6 +12,7 @@ int    queue_push(Queue *q, Job *job);
 Job   *queue_pop(Queue *q);
 Job   *queue_try_pop(Queue *q);
 Job   *queue_try_pop_matching(Queue *q, QueuePredicate predicate, void *context);
+Job   *queue_remove(Queue *q, const char *job_id);
 int    queue_size(Queue *q);
 void   queue_shutdown(Queue *q);
 

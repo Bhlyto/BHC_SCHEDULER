@@ -133,6 +133,18 @@ Returns the updated job object. Returns `409` if the job is already in a termina
 
 ---
 
+### Retry a job
+```http
+POST /jobs/:id/retry
+```
+
+Retries a `FAILED` or `CANCELLED` job with the same ID and resource request.
+The scheduler preserves inputs, clears previous logs/output artifact metadata,
+and puts the job back in `QUEUED`. A cancelled process must have fully exited;
+otherwise the endpoint returns `409` and can be called again shortly after.
+
+---
+
 ### Purge terminal jobs
 ```http
 DELETE /jobs

@@ -287,6 +287,41 @@ int db_update_job_status(const char *job_id, JobStatus status,
     return (rc == SQLITE_DONE) ? 0 : -1;
 }
 
+int db_retry_job(const char *job_id)
+{
+    if (sqlite3_exec(s_db, "BEGIN IMMEDIATE;", NULL, NULL, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_stmt *st = NULL;
+    const char *sql =
+        "UPDATE jobs SET status=?,machine_id='',exit_code=NULL,started_at=NULL,"
+        "ended_at=NULL,status_reason='Retry requested'"
+        " WHERE id=? AND status IN (?,?);";
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) goto rollback;
+    sqlite3_bind_int(st, 1, JOB_STATUS_QUEUED);
+    sqlite3_bind_text(st, 2, job_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 3, JOB_STATUS_FAILED);
+    sqlite3_bind_int(st, 4, JOB_STATUS_CANCELLED);
+    if (sqlite3_step(st) != SQLITE_DONE) goto rollback;
+    sqlite3_finalize(st);
+    st = NULL;
+    if (sqlite3_changes(s_db) != 1) goto rollback;
+
+    if (sqlite3_prepare_v2(s_db, "DELETE FROM artifacts WHERE job_id=?;",
+                           -1, &st, NULL) != SQLITE_OK) goto rollback;
+    sqlite3_bind_text(st, 1, job_id, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) != SQLITE_DONE) goto rollback;
+    sqlite3_finalize(st);
+    st = NULL;
+    if (sqlite3_exec(s_db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
+        goto rollback;
+    return 0;
+
+rollback:
+    if (st) sqlite3_finalize(st);
+    sqlite3_exec(s_db, "ROLLBACK;", NULL, NULL, NULL);
+    return -1;
+}
+
 int db_update_job_started(const char *job_id, const char *machine_id,
                            time_t started_at)
 {

@@ -163,6 +163,28 @@ Job *queue_try_pop_matching(Queue *q, QueuePredicate predicate, void *context)
     return job;
 }
 
+Job *queue_remove(Queue *q, const char *job_id)
+{
+    if (!q || !job_id) return NULL;
+    mutex_lock(&q->lock);
+    int index = -1;
+    for (int i = 0; i < q->size; i++) {
+        if (strcmp(q->heap[i]->id, job_id) == 0) { index = i; break; }
+    }
+    if (index < 0) { mutex_unlock(&q->lock); return NULL; }
+    Job *job = q->heap[index];
+    q->heap[index] = q->heap[--q->size];
+    if (index < q->size) {
+        int parent = (index - 1) / 2;
+        if (index > 0 && job_before(q->heap[index], q->heap[parent]))
+            heap_up(q, index);
+        else
+            heap_down(q, index);
+    }
+    mutex_unlock(&q->lock);
+    return job;
+}
+
 int queue_size(Queue *q)
 {
     mutex_lock(&q->lock);

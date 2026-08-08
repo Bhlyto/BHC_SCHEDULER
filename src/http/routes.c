@@ -1414,6 +1414,8 @@ static void cancel_job(struct mg_connection *c, struct mg_http_message *hm,
         job_free(job);
         return;
     }
+    Job *queued = queue_remove(scheduler_queue(), job_id);
+    if (queued) job_free(queued);
     job_set_status_r(job, JOB_STATUS_CANCELLED, "Cancelled by user");
     executor_terminate(job_id);
     cJSON *resp = job_to_json(job);
@@ -1422,6 +1424,53 @@ static void cancel_job(struct mg_connection *c, struct mg_http_message *hm,
     free(s);
     cJSON_Delete(resp);
     job_free(job);
+}
+
+static void retry_job(struct mg_connection *c, struct mg_http_message *hm,
+                      const char *job_id)
+{
+    (void)hm;
+    Job *previous = db_get_job(job_id);
+    if (!previous) { http_error(c, 404, "Job not found"); return; }
+    if (previous->status != JOB_STATUS_FAILED &&
+        previous->status != JOB_STATUS_CANCELLED) {
+        job_free(previous);
+        http_error(c, 409, "Only FAILED or CANCELLED jobs can be retried");
+        return;
+    }
+    if (executor_is_active(job_id)) {
+        job_free(previous);
+        http_error(c, 409, "Previous process is still terminating");
+        return;
+    }
+    job_free(previous);
+
+    Job *stale = queue_remove(scheduler_queue(), job_id);
+    if (stale) job_free(stale);
+    if (db_retry_job(job_id) != 0) {
+        http_error(c, 409, "Job could not be retried");
+        return;
+    }
+    store_reset_job_outputs(job_id);
+
+    Job *retry = db_get_job(job_id);
+    if (!retry) {
+        db_update_job_status(job_id, JOB_STATUS_FAILED, -1, time(NULL));
+        http_error(c, 500, "Failed to queue retry");
+        return;
+    }
+    cJSON *response = job_to_json(retry);
+    char *json = cJSON_PrintUnformatted(response);
+    cJSON_Delete(response);
+    if (!json || queue_push(scheduler_queue(), retry) != 0) {
+        free(json);
+        job_free(retry);
+        db_update_job_status(job_id, JOB_STATUS_FAILED, -1, time(NULL));
+        http_error(c, 500, "Failed to queue retry");
+        return;
+    }
+    http_json_reply(c, 200, json);
+    free(json);
 }
 
 static void purge_jobs(struct mg_connection *c, struct mg_http_message *hm)
@@ -2968,6 +3017,9 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
             }
             if (strcmp(method, "POST") == 0 && strcmp(seg[2], "cancel") == 0 && seg[3][0] == '\0') {
                 cancel_job(c, hm, seg[1]); return;
+            }
+            if (strcmp(method, "POST") == 0 && strcmp(seg[2], "retry") == 0 && seg[3][0] == '\0') {
+                retry_job(c, hm, seg[1]); return;
             }
             if (strcmp(method, "POST") == 0 && strcmp(seg[2], "release") == 0 && seg[3][0] == '\0') {
                 release_job(c, hm, seg[1]); return;

@@ -136,6 +136,21 @@ int executor_terminate(const char *job_id)
     return found;
 }
 
+int executor_is_active(const char *job_id)
+{
+    int found = 0;
+    active_lock();
+    for (int i = 0; i < MAX_ACTIVE_PROCESSES; i++) {
+        if (s_active_processes[i].active &&
+            strcmp(s_active_processes[i].job_id, job_id) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    active_unlock();
+    return found;
+}
+
 int executor_shutdown(void)
 {
     active_lock();

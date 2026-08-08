@@ -5,6 +5,7 @@
 
 int  store_init_job_dirs(const char *job_id);
 int  store_cleanup_job(const char *job_id);
+int  store_reset_job_outputs(const char *job_id);
 void store_input_dir(const char *job_id,  char *buf, int len);
 void store_output_dir(const char *job_id, char *buf, int len);
 void store_stdout_path(const char *job_id, char *buf, int len);

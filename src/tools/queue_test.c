@@ -54,6 +54,16 @@ int main(void)
     if (!selected || strcmp(selected->id, "blocked-priority") != 0) return 1;
     free(selected);
 
+    queue_push(queue, make_job("keep", 50, 4, 1));
+    queue_push(queue, make_job("remove", 10, 3, 1));
+    Job *removed = queue_remove(queue, "remove");
+    if (!removed || strcmp(removed->id, "remove") != 0 || queue_size(queue) != 1)
+        return 1;
+    free(removed);
+    selected = queue_try_pop(queue);
+    if (!selected || strcmp(selected->id, "keep") != 0) return 1;
+    free(selected);
+
     queue_destroy(queue);
     return 0;
 }
