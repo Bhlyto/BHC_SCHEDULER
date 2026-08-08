@@ -94,6 +94,16 @@ Manual gates before the final v1 tag:
 The v1 tag must not claim multi-worker validation until gate 3 has been run on
 real infrastructure.
 
+## Current release decision
+
+Status on 2026-08-08: **automated release candidate accepted; v1 tag on hold**.
+Commit `65a0ef2` builds successfully and passes 11/11 CTest targets, including
+1,000 executed local processes. The remaining release blocker is operational,
+not hidden code work: run a representative ShardSim campaign on two real SSH
+workers, verify that both receive jobs and validate the produced scientific
+outputs. The annotated `v1` tag may be created only after that evidence and the
+production-like SQLite backup/reopen check are attached to the release record.
+
 ## Incremental change ledger
 
 The `codex/v1-simplification` branch intentionally uses one reviewable commit
@@ -114,5 +124,5 @@ per decision:
 13. `7b45da0` retry terminal jobs safely;
 14. `57244e2` execute a 1000-job campaign in CI/local tests;
 15. `e3a8061` document and enforce the v1 support scope;
-16. the final merge commit integrates upstream hardening and records the
-    conflict-resolution decisions above.
+16. `65a0ef2` integrates upstream hardening and records the conflict-resolution
+    decisions above.
