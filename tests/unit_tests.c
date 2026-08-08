@@ -222,9 +222,18 @@ static void test_machine_registry(void)
     CHECK(file != NULL, "registry fixture can be created");
     if (!file) return;
     const char *json =
-        "{\"machines\":[{\"id\":\"test-machine\",\"hostname\":\"localhost\","
-        "\"enabled\":true,\"cores\":4,\"gpu_count\":0,\"ram_mb\":4096,"
-        "\"disk_mb\":10000,\"type\":\"static\"}]}";
+        "{\r\n"
+        "  \"machines\": [{\r\n"
+        "    \"id\": \"test-machine\",\r\n"
+        "    \"hostname\": \"localhost\",\r\n"
+        "    \"enabled\": true,\r\n"
+        "    \"cores\": 4,\r\n"
+        "    \"gpu_count\": 0,\r\n"
+        "    \"ram_mb\": 4096,\r\n"
+        "    \"disk_mb\": 10000,\r\n"
+        "    \"type\": \"static\"\r\n"
+        "  }]\r\n"
+        "}\r\n";
     fwrite(json, 1, strlen(json), file);
     fclose(file);
 

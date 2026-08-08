@@ -85,7 +85,9 @@ static int registry_contains_unlocked(const char *machine_id)
 
 int registry_load(const char *json_path)
 {
-    FILE *f = fopen(json_path, "r");
+    /* Binary mode keeps fread's byte count consistent with ftell on Windows,
+     * where text mode otherwise translates CRLF to LF while reading. */
+    FILE *f = fopen(json_path, "rb");
     if (!f) { log_error("registry", "Cannot open %s", json_path); return -1; }
 
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
