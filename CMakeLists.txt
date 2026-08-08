@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(orchestrator C)
 
+include(CTest)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -100,6 +102,15 @@ add_executable(presim_e2e_test
 )
 target_include_directories(presim_e2e_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(presim_e2e_test ${PLATFORM_LIBS})
+
+if(BUILD_TESTING)
+    add_test(NAME decision_core COMMAND $<TARGET_FILE:dc_test>)
+    add_test(NAME presim_e2e COMMAND $<TARGET_FILE:presim_e2e_test>)
+
+    set_tests_properties(decision_core presim_e2e PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+endif()
 
 # Copy config/ next to the executable after each build
 add_custom_command(TARGET orchestrator POST_BUILD
