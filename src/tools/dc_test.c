@@ -8,15 +8,24 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* Minimal platform stubs required by the core sources linked into this test. */
+void platform_service_start(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+}
+
+void platform_request_stop(void)
+{
+}
+
+int platform_stop_requested(void)
+{
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
-    /* Provide minimal platform stubs expected by linked core code */
-    (void)argc; (void)argv;
-
-    void platform_service_start(int a, char **b) { (void)a; (void)b; }
-    void platform_request_stop(void) { }
-    int platform_stop_requested(void) { return 1; }
-
     (void)argc; (void)argv;
     config_defaults();
     config_load("config/orchestrator.conf");

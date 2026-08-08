@@ -19,6 +19,21 @@
 
 static int s_initialized = 0;
 
+typedef struct {
+    int idx;
+    double ratio;
+    int req;
+} Pick;
+
+static int compare_pick_ratio_desc(const void *a, const void *b)
+{
+    const Pick *pa = (const Pick *)a;
+    const Pick *pb = (const Pick *)b;
+    if (pa->ratio < pb->ratio) return 1;
+    if (pa->ratio > pb->ratio) return -1;
+    return 0;
+}
+
 static double deterministic_zone_error(const char *job_id, int zone_idx, double base)
 {
     /* Deterministic pseudo-random variation using job id and zone_idx */
@@ -237,8 +252,7 @@ int decision_core_decide(const dc_context_t *ctx, dc_result_t *out)
     uint32_t cap = ctx->available_cpus > 0 ? ctx->available_cpus : want;
     if (want > cap && cap > 0) {
         /* build array of indices and ratios */
-        typedef struct { int idx; double ratio; int req; } pick_t;
-        pick_t *picks = (pick_t*)malloc(sizeof(pick_t) * zones);
+        Pick *picks = (Pick *)malloc(sizeof(Pick) * zones);
         int pcount = 0;
         for (int i = 0; i < zones; i++) {
             /* parse the per-zone req_cores from alloc JSON is cumbersome; instead recompute quickly */
@@ -254,13 +268,7 @@ int decision_core_decide(const dc_context_t *ctx, dc_result_t *out)
             picks[pcount].idx = i; picks[pcount].ratio = priority / (double)req; picks[pcount].req = req; pcount++;
         }
         /* sort descending by ratio */
-        int cmp(const void *a, const void *b) {
-            const pick_t *pa = a; const pick_t *pb = b;
-            if (pa->ratio < pb->ratio) return 1;
-            if (pa->ratio > pb->ratio) return -1;
-            return 0;
-        }
-        qsort(picks, pcount, sizeof(pick_t), cmp);
+        qsort(picks, pcount, sizeof(Pick), compare_pick_ratio_desc);
         /* select until cap */
         uint32_t used = 0;
         int *selected = (int*)calloc(zones, sizeof(int));
