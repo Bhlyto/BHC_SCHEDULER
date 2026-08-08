@@ -66,7 +66,7 @@ function WaitJob($id, $sec = $JobTimeoutSec) {
     for ($i = 0; $i -lt ($sec * 2); $i++) {
         Start-Sleep -Milliseconds 500
         $r = Req GET "/jobs/$id"
-        if ($r.status -match "FINISHED|FAILED|CANCELLED") { return $r }
+        if ($r.status -match "SUCCEEDED|FAILED|CANCELLED") { return $r }
     }
     return Req GET "/jobs/$id"
 }
@@ -111,12 +111,12 @@ Check "Provision local machine"           "true|ok|already" ($r | ConvertTo-Json
 Write-Host "`n-- 2. Soumission de job" -ForegroundColor Cyan
 
 $r = Req POST "/jobs" '{"command":"echo hello","priority":10,"cores":1,"ram_mb":64}'
-Check "Soumission minimale -> IN_QUEUE"    "IN_QUEUE" $r.status
+Check "Soumission minimale -> QUEUED"      "QUEUED" $r.status
 Check "Reponse contient un id UUID"        "[0-9a-f-]{36}" $r.id
 $JOB_BASIC = $r.id
 
 $r = Req POST "/jobs" '{"command":"echo full","priority":5,"cores":1,"gpu":0,"ram_mb":128,"disk_mb":256}'
-Check "Soumission avec tous les champs"    "IN_QUEUE" $r.status
+Check "Soumission avec tous les champs"    "QUEUED" $r.status
 $JOB_FULL = $r.id
 
 $r = Req POST "/jobs" '{"priority":1}'
@@ -134,7 +134,7 @@ Check "GET /jobs contient le job soumis"   $JOB_BASIC $listJson
 $r = Req GET "/jobs/$JOB_BASIC"
 Check "GET /jobs/:id retourne le bon id"   $JOB_BASIC $r.id
 Check "GET /jobs/:id contient command"     "echo hello" $r.command
-Check "GET /jobs/:id contient status"      "IN_QUEUE|STARTING|RUNNING|FINISHED|FAILED" $r.status
+Check "GET /jobs/:id contient status"      "QUEUED|RUNNING|SUCCEEDED|FAILED" $r.status
 
 $r = Req GET "/jobs/JOB_ID"
 Check "Job inexistant -> 404"              "404|not.found" ($r | ConvertTo-Json)
@@ -145,7 +145,7 @@ Check "Job inexistant -> 404"              "404|not.found" ($r | ConvertTo-Json)
 Write-Host "`n-- 4. Execution -- job simple" -ForegroundColor Cyan
 
 $r = WaitJob $JOB_BASIC
-Check "Job echo hello -> FINISHED"        "FINISHED" $r.status
+Check "Job echo hello -> SUCCEEDED"       "SUCCEEDED" $r.status
 Check "Exit code = 0"                     "^0$" "$($r.exit_code)"
 Check "machine_id renseigne"              "." $r.machine_id
 
@@ -163,7 +163,7 @@ Write-Host "`n-- 5. Logs du job" -ForegroundColor Cyan
 $r = Req POST "/jobs" '{"command":"echo stdout_test","priority":1,"cores":1,"ram_mb":64}'
 $log_id = $r.id
 $r = WaitJob $log_id 20
-Check "Job log -> FINISHED"               "FINISHED" $r.status
+Check "Job log -> SUCCEEDED"              "SUCCEEDED" $r.status
 
 $r = ReqRaw GET "/jobs/$log_id/log"
 if ($r.StatusCode -eq 200) {
@@ -195,7 +195,7 @@ if ($r.StatusCode -eq 200) { Pass "Upload input -> 200" }
 else { Fail "Upload input" "code=$($r.StatusCode): $($r.Content)" }
 
 $r = WaitJob $io_id 20
-Check "Job avec input -> FINISHED"        "FINISHED" $r.status
+Check "Job avec input -> SUCCEEDED"       "SUCCEEDED" $r.status
 
 $r = ReqRaw GET "/jobs/$io_id/output"
 if ($r.StatusCode -eq 200) { Pass "Download output -> 200" }
@@ -214,7 +214,7 @@ $cancel_id = $r.id
 for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Milliseconds 500
     $st = (Req GET "/jobs/$cancel_id").status
-    if ($st -match "RUNNING|STARTING") { break }
+    if ($st -match "RUNNING") { break }
 }
 $r = Req DELETE "/jobs/$cancel_id"
 if ($r._error -eq 409) {
@@ -300,10 +300,10 @@ Write-Host "`n-- 13. Priorite" -ForegroundColor Cyan
 
 $low  = Req POST "/jobs" '{"command":"echo low","priority":100,"cores":1,"ram_mb":64}'
 $high = Req POST "/jobs" '{"command":"echo high","priority":1,"cores":1,"ram_mb":64}'
-Check "Job haute priorite soumis"         "IN_QUEUE|STARTING" $high.status
-Check "Job basse priorite soumis"         "IN_QUEUE|STARTING" $low.status
+Check "Job haute priorite soumis"         "QUEUED|RUNNING" $high.status
+Check "Job basse priorite soumis"         "QUEUED|RUNNING" $low.status
 $r = WaitJob $high.id 15
-Check "Job haute priorite -> FINISHED"    "FINISHED" $r.status
+Check "Job haute priorite -> SUCCEEDED"   "SUCCEEDED" $r.status
 
 # =============================================
 #  14. PURGE
@@ -312,7 +312,7 @@ Write-Host "`n-- 14. Purge" -ForegroundColor Cyan
 
 # Submit a quick job and wait for it to finish
 $pj = Req POST "/jobs" '{"command":"echo purge_test","priority":1,"cores":1,"ram_mb":64}'
-Check "Purge: job soumis"          "IN_QUEUE|STARTING|FINISHED" $pj.status
+Check "Purge: job soumis"          "QUEUED|RUNNING|SUCCEEDED" $pj.status
 [void](WaitJob $pj.id 15)
 
 # Purge all terminal jobs
@@ -357,14 +357,14 @@ $wf_jobs = $r.jobs
 $wf_step1_id = $wf_jobs[0].id
 $wf_step2_id = $wf_jobs[1].id
 Check "Step 1 soumis"                      "[0-9a-f-]{36}" $wf_step1_id
-Check "Step 2 en HELD"                     "HELD" $wf_jobs[1].status
+Check "Step 2 en CREATED"                  "CREATED" $wf_jobs[1].status
 
 # Wait for both to finish
 $r1 = WaitJob $wf_step1_id 30
-Check "Step 1 -> FINISHED"                "FINISHED" $r1.status
+Check "Step 1 -> SUCCEEDED"               "SUCCEEDED" $r1.status
 
 $r2 = WaitJob $wf_step2_id 30
-Check "Step 2 -> FINISHED (file forwarded)" "FINISHED" $r2.status
+Check "Step 2 -> SUCCEEDED (file forwarded)" "SUCCEEDED" $r2.status
 
 # Verify step 2 stdout contains the forwarded data
 $r = ReqRaw GET "/jobs/$wf_step2_id/log"
@@ -407,11 +407,11 @@ $sm_step2_id = $sm_jobs[1].id
 Check "Step 2 has same_machine_as set"     $sm_step1_id $sm_jobs[1].same_machine_as
 
 $r1 = WaitJob $sm_step1_id 20
-Check "Same-machine step 1 -> FINISHED"   "FINISHED" $r1.status
+Check "Same-machine step 1 -> SUCCEEDED"  "SUCCEEDED" $r1.status
 $machine1 = $r1.machine_id
 
 $r2 = WaitJob $sm_step2_id 20
-Check "Same-machine step 2 -> FINISHED"   "FINISHED" $r2.status
+Check "Same-machine step 2 -> SUCCEEDED"  "SUCCEEDED" $r2.status
 $machine2 = $r2.machine_id
 
 if ($machine1 -and $machine2 -and $machine1 -eq $machine2) {
@@ -454,7 +454,7 @@ $ch_jobs = $r.jobs
 $ch3_id = $ch_jobs[2].id
 
 $r3 = WaitJob $ch3_id 45
-Check "Step 3 -> FINISHED"               "FINISHED" $r3.status
+Check "Step 3 -> SUCCEEDED"              "SUCCEEDED" $r3.status
 
 $r = ReqRaw GET "/jobs/$ch3_id/log"
 if ($r.StatusCode -eq 200 -and $r.Content -match "chain-middle") {

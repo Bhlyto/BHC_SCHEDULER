@@ -46,8 +46,7 @@ int main(void)
     strncpy(queued_id, queued->id, sizeof(queued_id));
     strncpy(starting_id, starting->id, sizeof(starting_id));
     strncpy(running_id, running->id, sizeof(running_id));
-    job_set_status(starting, JOB_STATUS_STARTING);
-    job_set_status(running, JOB_STATUS_STARTING);
+    db_update_job_status(starting->id, (JobStatus)1, 0, 0);
     job_set_status(running, JOB_STATUS_RUNNING);
     job_free(queued);
     job_free(starting);
@@ -64,7 +63,7 @@ int main(void)
     Job *q = db_get_job(queued_id);
     Job *s = db_get_job(starting_id);
     Job *r = db_get_job(running_id);
-    int ok = q && q->status == JOB_STATUS_IN_QUEUE &&
+    int ok = q && q->status == JOB_STATUS_QUEUED &&
              s && s->status == JOB_STATUS_FAILED &&
              r && r->status == JOB_STATUS_FAILED &&
              strstr(s->status_reason, "restarted") != NULL &&

@@ -2,11 +2,11 @@
 
 function jobActions(j) {
   let btns = '';
-  if (j.status === 'IN_QUEUE' || j.status === 'RUNNING' || j.status === 'HELD' || j.status === 'STARTING')
+  if (j.status === 'QUEUED' || j.status === 'RUNNING' || j.status === 'CREATED')
     btns += '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();cancelJob(\''+j.id+'\')">Cancel</button>';
-  if (j.status === 'HELD')
+  if (j.status === 'CREATED')
     btns += ' <button class="btn btn-sm btn-outline" onclick="event.stopPropagation();releaseJob(\''+j.id+'\')">Release</button>';
-  if (j.status === 'RUNNING' || j.status === 'STARTING')
+  if (j.status === 'RUNNING')
     btns += ' <button class="btn btn-sm btn-outline" style="border-color:var(--red);color:var(--red)" onclick="event.stopPropagation();killJob(\''+j.id+'\')">Kill</button>';
   return btns;
 }
@@ -99,7 +99,7 @@ async function releaseJob(id) {
 
 async function killJob(id) {
   if (!confirm('Kill this job? It will be forcefully terminated.')) return;
-  try { await api('DELETE', '/jobs/' + id); toast('Job killed'); loadJobs(); }
+  try { await api('POST', '/jobs/' + id + '/cancel'); toast('Job killed'); loadJobs(); }
   catch(e) { toast(e.data?.error || 'Kill failed', true); }
 }
 
@@ -247,7 +247,7 @@ async function submitJob() {
 }
 
 async function cancelJob(id) {
-  try { await api('DELETE', '/jobs/' + id); toast('Job cancelled'); loadJobs(); }
+  try { await api('POST', '/jobs/' + id + '/cancel'); toast('Job cancelled'); loadJobs(); }
   catch(e) { toast(e.data?.error || 'Cancel failed', true); }
 }
 
@@ -304,7 +304,7 @@ async function showJobDetail(id) {
       } else {
         html += '<div style="font-size:12px;color:var(--text2);margin-top:6px">No files uploaded yet</div>';
       }
-      if (j.status === 'HELD') {
+      if (j.status === 'CREATED') {
         html += '<div style="margin-top:8px">'
           + '<label style="font-size:12px">Upload files</label>'
           + '<input id="jdUpload" type="file" multiple style="padding:6px;font-size:12px">'
@@ -336,7 +336,7 @@ async function viewLog(jobId, isStderr) {
   el.style.display = 'block';
   el.textContent = 'Loading...';
   try {
-    const r = await apiRaw('GET', '/jobs/' + jobId + '/log' + (isStderr ? '/stderr' : ''));
+    const r = await apiRaw('GET', '/jobs/' + jobId + '/logs' + (isStderr ? '/stderr' : ''));
     el.textContent = await r.text();
   } catch(e) { el.textContent = 'Error loading log'; }
 }

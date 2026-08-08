@@ -88,7 +88,7 @@ int alloc_can_fit(int req_cores, int req_gpu, int req_ram_mb, int req_disk_mb)
 
 /*
  * Fill `out` with a human-readable explanation of why no machine can satisfy
- * the requirements. Helps diagnose jobs stuck IN_QUEUE.
+ * the requirements. Helps diagnose jobs stuck QUEUED.
  */
 void alloc_diagnose(int req_cores, int req_gpu, int req_ram_mb, int req_disk_mb,
                     char *out, int out_len)

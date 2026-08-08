@@ -20,7 +20,7 @@ Invoke-RestMethod -Uri "$base/auth/change-password" -Method POST -Headers $heade
 $body = '{"command":"echo hello","req_cores":1,"req_ram_mb":512,"app_id":"app1"}'
 Invoke-RestMethod -Uri "$base/jobs" -Method POST -Headers $headers -Body $body
 
-# Submit with expected input files (job starts HELD)
+# Submit with expected input files (job starts CREATED)
 $body = '{"command":"process.exe","input_files":["data.csv"],"app_id":"app1"}'
 Invoke-RestMethod -Uri "$base/jobs" -Method POST -Headers $headers -Body $body
 

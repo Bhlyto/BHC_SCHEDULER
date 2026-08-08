@@ -15,7 +15,7 @@ A lightweight daemon written in C that exposes a REST API for submitting, tracki
 - **Agentless workers** — run locally or push jobs to a small heterogeneous worker pool over SSH, with scheduler-owned resource state and availability probes
 - **Application definitions** — define apps as JSON files with pre-set resource requirements and dynamic form fields; users pick an app when submitting a job
 - **Artifact metadata** — persist URIs and sizes for stdout, stderr, and recursively collected output files without turning the scheduler into a storage system
-- **HELD jobs** — submit a job with expected input files; it stays in `HELD` state until all files are uploaded, then auto-releases to the queue
+- **CREATED jobs** — submit expected input files; the job stays `CREATED` until inputs arrive, then moves to `QUEUED`
 - **Job logs** — stdout and stderr of each job are captured and retrievable via API
 - **Pre-job scripts** — run a setup script before each job; receives job context via environment variables
 - **Real-time events** — subscribe to a Server-Sent Events (SSE) stream for live job state updates and an initial snapshot

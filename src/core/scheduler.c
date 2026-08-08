@@ -110,7 +110,7 @@ static int job_fits_available_resources(const Job *job, void *context)
                          job->req_ram_mb, job->req_disk_mb);
 }
 
-/* ── Periodic: check all HELD jobs and release those whose files are ready ── */
+/* Periodic: release CREATED jobs once their required inputs are ready. */
 static void scheduler_check_held_jobs(void)
 {
     Job *jobs = (Job *)malloc(256 * sizeof(Job));
@@ -226,7 +226,7 @@ static void scheduler_check_held_jobs(void)
                                 }
                                 if (depends_buf[0]) {
                                     db_update_depends_on(j->id, depends_buf);
-                                    db_update_job_status(j->id, JOB_STATUS_HELD, 0, 0);
+                                    db_update_job_status(j->id, JOB_STATUS_CREATED, 0, 0);
                                     db_update_status_reason(j->id, "Waiting for refinement subjobs");
                                 }
                             }
@@ -253,7 +253,7 @@ static void scheduler_check_held_jobs(void)
             int present = count_present_files(input_dir, j->input_files);
 
             log_debug("scheduler",
-                "HELD job %s: expecting %d files, %d present",
+                "CREATED job %s: expecting %d files, %d present",
                 j->id, expected, present);
 
             if (present < expected)
@@ -274,7 +274,7 @@ static void scheduler_check_held_jobs(void)
             else
                 snprintf(reason, sizeof(reason),
                     "All dependencies satisfied");
-            job_set_status_r(full, JOB_STATUS_IN_QUEUE, reason);
+            job_set_status_r(full, JOB_STATUS_QUEUED, reason);
             queue_push(s_queue, full);
         }
     }
@@ -334,7 +334,7 @@ static void *scheduler_thread(void *arg)
     while (s_running) {
         sleep_ms(g_config.scheduler_poll_ms);
 
-        /* Every 10 ticks: check HELD jobs + enforce timeouts */
+        /* Every 10 ticks: check CREATED jobs and enforce timeouts. */
         if (++tick % 10 == 0) {
             scheduler_check_held_jobs();
             scheduler_check_timeouts();
@@ -349,7 +349,7 @@ static void *scheduler_thread(void *arg)
         /* The database is authoritative. A queued object may be stale when a
            cancellation raced with the in-memory queue. */
         Job *persisted = db_get_job(job->id);
-        if (!persisted || persisted->status != JOB_STATUS_IN_QUEUE) {
+        if (!persisted || persisted->status != JOB_STATUS_QUEUED) {
             if (persisted) job_free(persisted);
             job_free(job);
             continue;
@@ -494,7 +494,7 @@ static void *scheduler_thread(void *arg)
                     queue_push(s_queue, child);
                     /* mark parent as held and depends_on child */
                     db_update_depends_on(job->id, child->id);
-                    db_update_job_status(job->id, JOB_STATUS_HELD, 0, 0);
+                    db_update_job_status(job->id, JOB_STATUS_CREATED, 0, 0);
                     db_update_status_reason(job->id, "Waiting for presim subjob");
                     continue; /* don't run decision core yet */
                 } else {
@@ -583,9 +583,9 @@ static void *scheduler_thread(void *arg)
                                 strncat(depends_buf, child->id, sizeof(depends_buf)-strlen(depends_buf)-1);
                             }
                             if (depends_buf[0]) {
-                                /* Mark parent job as HELD until child refinements finish */
+                                /* Return the parent to CREATED until refinements finish. */
                                 db_update_depends_on(job->id, depends_buf);
-                                db_update_job_status(job->id, JOB_STATUS_HELD, 0, 0);
+                                db_update_job_status(job->id, JOB_STATUS_CREATED, 0, 0);
                                 db_update_status_reason(job->id, "Waiting for refinement subjobs");
                                 /* Do not dispatch parent now */
                                 continue;

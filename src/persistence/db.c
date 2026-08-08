@@ -291,12 +291,13 @@ int db_update_job_started(const char *job_id, const char *machine_id,
                            time_t started_at)
 {
     const char *sql =
-        "UPDATE jobs SET machine_id=?, started_at=?, status=1 WHERE id=?;";
+        "UPDATE jobs SET machine_id=?, started_at=?, status=? WHERE id=?;";
     sqlite3_stmt *st;
     if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
     sqlite3_bind_text (st, 1, machine_id, -1, SQLITE_STATIC);
     sqlite3_bind_int64(st, 2, (sqlite3_int64)started_at);
-    sqlite3_bind_text (st, 3, job_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int  (st, 3, JOB_STATUS_RUNNING);
+    sqlite3_bind_text (st, 4, job_id, -1, SQLITE_STATIC);
     int rc = sqlite3_step(st);
     sqlite3_finalize(st);
     return (rc == SQLITE_DONE) ? 0 : -1;
@@ -460,7 +461,7 @@ int db_recover_incomplete_jobs(void)
     sqlite3_bind_int(st, 1, JOB_STATUS_FAILED);
     sqlite3_bind_text(st, 2, "Scheduler restarted while job was active",
                       -1, SQLITE_STATIC);
-    sqlite3_bind_int(st, 3, JOB_STATUS_STARTING);
+    sqlite3_bind_int(st, 3, 1); /* legacy pre-v1 STARTING value */
     sqlite3_bind_int(st, 4, JOB_STATUS_RUNNING);
     if (sqlite3_step(st) != SQLITE_DONE) goto rollback;
     sqlite3_finalize(st);
@@ -546,11 +547,10 @@ int db_get_batch_stats(const char *batch_id, BatchStats *out)
         int count = sqlite3_column_int(st, 1);
         out->total += count;
         switch (status) {
-            case JOB_STATUS_HELD:      out->created += count; break;
-            case JOB_STATUS_IN_QUEUE:  out->queued += count; break;
-            case JOB_STATUS_STARTING:
+            case JOB_STATUS_CREATED:   out->created += count; break;
+            case JOB_STATUS_QUEUED:    out->queued += count; break;
             case JOB_STATUS_RUNNING:   out->running += count; break;
-            case JOB_STATUS_FINISHED:  out->succeeded += count; break;
+            case JOB_STATUS_SUCCEEDED: out->succeeded += count; break;
             case JOB_STATUS_FAILED:    out->failed += count; break;
             case JOB_STATUS_CANCELLED: out->cancelled += count; break;
             default: break;
@@ -857,7 +857,7 @@ int db_check_deps_status(const char *depends_on_csv)
         if (status == -99) return -1; /* dep not found = error */
         if (status == JOB_STATUS_FAILED || status == JOB_STATUS_CANCELLED)
             return -1; /* dep failed */
-        if (status != JOB_STATUS_FINISHED)
+        if (status != JOB_STATUS_SUCCEEDED)
             return 1; /* still waiting */
 
         tok = strtok(NULL, ",");
@@ -900,13 +900,13 @@ int db_job_stats(JobStats *out)
         int count  = sqlite3_column_int(st, 1);
         out->total += count;
         switch ((JobStatus)status) {
-            case JOB_STATUS_HELD:      out->held      += count; break;
-            case JOB_STATUS_IN_QUEUE:  out->in_queue  += count; break;
-            case JOB_STATUS_STARTING:  out->starting  += count; break;
+            case JOB_STATUS_CREATED:   out->created   += count; break;
+            case JOB_STATUS_QUEUED:    out->queued    += count; break;
             case JOB_STATUS_RUNNING:   out->running   += count; break;
-            case JOB_STATUS_FINISHED:  out->finished  += count; break;
+            case JOB_STATUS_SUCCEEDED: out->succeeded += count; break;
             case JOB_STATUS_CANCELLED: out->cancelled += count; break;
             case JOB_STATUS_FAILED:    out->failed    += count; break;
+            case 1:                    out->running   += count; break;
         }
     }
     sqlite3_finalize(st);
@@ -1246,9 +1246,8 @@ int db_quota_check(const char *user_id, const char *app_id,
     if (resolve_quota(user_id, app_id, &q) != 0)
         return 0;  /* no quota configured → allow */
 
-    /* Count only STARTING(1) and RUNNING(2) jobs — those that are actually
-       consuming resources right now.  Queued / held jobs are not counted;
-       they will wait their turn until a slot opens up. */
+    /* Count RUNNING(2) jobs and any legacy pre-v1 STARTING(1) rows. CREATED
+       and QUEUED jobs wait without consuming concurrency quota. */
     const char *sql_total =
         "SELECT COUNT(*), COALESCE(SUM(req_cores),0), COALESCE(SUM(req_ram_mb),0)"
         " FROM jobs WHERE status IN (1,2)"

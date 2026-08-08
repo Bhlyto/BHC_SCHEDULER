@@ -71,7 +71,7 @@ Content-Type: application/json
 | `req_disk_mb` | int | — | Disk in MB. Default: `0` |
 | `timeout_seconds` | int | — | Per-job timeout (0 = use global default) |
 | `app_id` | string | — | Associate job with an application definition |
-| `input_files` | string[] | — | Expected input filenames; job starts as `HELD` until all are uploaded |
+| `input_files` | string[] | — | Expected input filenames; job starts as `CREATED` until all are uploaded |
 
 Response `201`:
 ```json
@@ -95,9 +95,9 @@ Response `201`:
 }
 ```
 
-Job states: `QUEUED` → `STARTING` → `RUNNING` → `FINISHED` / `FAILED` / `CANCELLED`
+Job states: `CREATED` → `QUEUED` → `RUNNING` → `SUCCEEDED` / `FAILED` / `CANCELLED`
 
-When submitted with `input_files`: `HELD` → (files uploaded) → `QUEUED` → ...
+When submitted with `input_files`: `CREATED` → (files uploaded) → `QUEUED` → ...
 
 ---
 
@@ -105,7 +105,7 @@ When submitted with `input_files`: `HELD` → (files uploaded) → `QUEUED` → 
 ```http
 POST /jobs/:id/release
 ```
-Manually releases a `HELD` job to the queue, even if not all files have been uploaded.
+Manually releases a `CREATED` job to the queue, even if not all files have been uploaded.
 
 ---
 
@@ -137,7 +137,7 @@ Returns the updated job object. Returns `409` if the job is already in a termina
 ```http
 DELETE /jobs
 ```
-Deletes all `FINISHED`, `FAILED`, and `CANCELLED` jobs from the database and removes their work directories.
+Deletes all `SUCCEEDED`, `FAILED`, and `CANCELLED` jobs from the database and removes their work directories.
 
 Response:
 ```json

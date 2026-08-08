@@ -35,8 +35,8 @@ int  db_list_held_jobs(Job *jobs, int max_count);
 int  db_list_running_jobs(Job *jobs, int max_count);
 int  db_list_queued_jobs(Job *jobs, int max_count, int offset);
 
-/* Mark STARTING/RUNNING jobs as failed after a scheduler restart and release
-   their persisted allocations. Returns the number of recovered jobs. */
+/* Mark RUNNING jobs (and legacy pre-v1 STARTING rows) as failed after a
+   scheduler restart and release allocations. Returns the recovered count. */
 int  db_recover_incomplete_jobs(void);
 int  db_update_job_batch_id(const char *job_id, const char *batch_id);
 
@@ -108,11 +108,10 @@ int  db_list_api_keys(ApiKeyInfo *out, int max_count);
 
 typedef struct {
     int total;
-    int held;
-    int in_queue;
-    int starting;
+    int created;
+    int queued;
     int running;
-    int finished;
+    int succeeded;
     int cancelled;
     int failed;
 } JobStats;
@@ -164,7 +163,7 @@ int db_update_depends_on(const char *job_id, const char *depends_on);
 int db_update_workflow_id(const char *job_id, const char *workflow_id);
 int db_update_same_machine_as(const char *job_id, const char *ref_id);
 /* Check all dependency job statuses.
-   Returns: 0 = all FINISHED, 1 = still waiting, -1 = a dep FAILED/CANCELLED */
+   Returns: 0 = all SUCCEEDED, 1 = still waiting, -1 = a dep FAILED/CANCELLED */
 int db_check_deps_status(const char *depends_on_csv);
 
 /* ── Quotas ────────────────────────────────────── */

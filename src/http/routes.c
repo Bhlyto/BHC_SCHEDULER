@@ -31,7 +31,7 @@
  * Route table:
  *   POST   /jobs                      → submit_job
  *   GET    /jobs                      → list_jobs
- *   DELETE /jobs                      → purge_jobs  (delete all FINISHED/FAILED/CANCELLED)
+ *   DELETE /jobs                      → purge_jobs  (delete all terminal jobs)
  *   GET    /jobs/events               → sse_subscribe  (Server-Sent Events)
  *   GET    /jobs/:id                  → get_job
  *   DELETE /jobs/:id                  → cancel_job
@@ -766,8 +766,8 @@ static void submit_job(struct mg_connection *c, struct mg_http_message *hm,
 
     if (is_held) {
         strncpy(job->input_files, input_files_str, sizeof(job->input_files) - 1);
-        job->status = JOB_STATUS_HELD;
-        db_update_job_status(job->id, JOB_STATUS_HELD, 0, 0);
+        job->status = JOB_STATUS_CREATED;
+        db_update_job_status(job->id, JOB_STATUS_CREATED, 0, 0);
         if (input_files_str[0])
             db_update_input_files(job->id, input_files_str);
         char held_reason[256];
@@ -802,12 +802,12 @@ static void release_job(struct mg_connection *c, struct mg_http_message *hm,
     (void)hm;
     Job *job = db_get_job(job_id);
     if (!job) { http_error(c, 404, "Job not found"); return; }
-    if (job->status != JOB_STATUS_HELD) {
-        http_error(c, 409, "Job is not in HELD state");
+    if (job->status != JOB_STATUS_CREATED) {
+        http_error(c, 409, "Job is not in CREATED state");
         job_free(job);
         return;
     }
-    job_set_status_r(job, JOB_STATUS_IN_QUEUE, "Released manually by user");
+    job_set_status_r(job, JOB_STATUS_QUEUED, "Released manually by user");
     queue_push(scheduler_queue(), job);
     cJSON *resp = job_to_json(job);
     char *s = cJSON_PrintUnformatted(resp);
@@ -1277,8 +1277,8 @@ static void submit_workflow(struct mg_connection *c, struct mg_http_message *hm,
 
         int is_held = (depends_on_str[0] != '\0' || input_files_str[0] != '\0');
         if (is_held) {
-            job->status = JOB_STATUS_HELD;
-            db_update_job_status(job->id, JOB_STATUS_HELD, 0, 0);
+            job->status = JOB_STATUS_CREATED;
+            db_update_job_status(job->id, JOB_STATUS_CREATED, 0, 0);
             char held_reason[256];
             if (depends_on_str[0] && input_files_str[0])
                 snprintf(held_reason, sizeof(held_reason),
@@ -1315,7 +1315,7 @@ static void submit_workflow(struct mg_connection *c, struct mg_http_message *hm,
     for (int i = 0; i < created; i++) {
         cJSON_AddItemToArray(arr, job_to_json(created_jobs[i]));
         /* Free held jobs; queued ones are owned by the queue */
-        if (created_jobs[i]->status == JOB_STATUS_HELD)
+        if (created_jobs[i]->status == JOB_STATUS_CREATED)
             job_free(created_jobs[i]);
     }
 
@@ -1407,7 +1407,7 @@ static void cancel_job(struct mg_connection *c, struct mg_http_message *hm,
     (void)hm;
     Job *job = db_get_job(job_id);
     if (!job) { http_error(c, 404, "Job not found"); return; }
-    if (job->status == JOB_STATUS_FINISHED ||
+    if (job->status == JOB_STATUS_SUCCEEDED ||
         job->status == JOB_STATUS_FAILED   ||
         job->status == JOB_STATUS_CANCELLED) {
         http_error(c, 409, "Job already in terminal state");
@@ -1432,7 +1432,7 @@ static void purge_jobs(struct mg_connection *c, struct mg_http_message *hm)
     int count = db_list_jobs(jobs, 4096);
     int cleaned = 0;
     for (int i = 0; i < count; i++) {
-        if (jobs[i].status == JOB_STATUS_FINISHED ||
+        if (jobs[i].status == JOB_STATUS_SUCCEEDED ||
             jobs[i].status == JOB_STATUS_FAILED   ||
             jobs[i].status == JOB_STATUS_CANCELLED) {
             store_cleanup_job(jobs[i].id);
@@ -1450,7 +1450,7 @@ static void purge_jobs(struct mg_connection *c, struct mg_http_message *hm)
 static void check_and_auto_release(const char *job_id)
 {
     Job *job = db_get_job(job_id);
-    if (!job || job->status != JOB_STATUS_HELD || !job->input_files[0]) {
+    if (!job || job->status != JOB_STATUS_CREATED || !job->input_files[0]) {
         job_free(job);
         return;
     }
@@ -1479,7 +1479,7 @@ static void check_and_auto_release(const char *job_id)
 
     if (all_present) {
         log_info("routes", "All input files received for job %s — releasing to queue", job_id);
-        job_set_status_r(job, JOB_STATUS_IN_QUEUE, "All input files received via upload");
+        job_set_status_r(job, JOB_STATUS_QUEUED, "All input files received via upload");
         queue_push(scheduler_queue(), job);
     } else {
         job_free(job);
@@ -1751,11 +1751,10 @@ static void get_stats(struct mg_connection *c, struct mg_http_message *hm)
 
     cJSON *jobs = cJSON_CreateObject();
     cJSON_AddNumberToObject(jobs, "total",     js.total);
-    cJSON_AddNumberToObject(jobs, "held",      js.held);
-    cJSON_AddNumberToObject(jobs, "in_queue",  js.in_queue);
-    cJSON_AddNumberToObject(jobs, "starting",  js.starting);
+    cJSON_AddNumberToObject(jobs, "created",   js.created);
+    cJSON_AddNumberToObject(jobs, "queued",    js.queued);
     cJSON_AddNumberToObject(jobs, "running",   js.running);
-    cJSON_AddNumberToObject(jobs, "finished",  js.finished);
+    cJSON_AddNumberToObject(jobs, "succeeded", js.succeeded);
     cJSON_AddNumberToObject(jobs, "failed",    js.failed);
     cJSON_AddNumberToObject(jobs, "cancelled", js.cancelled);
     cJSON_AddItemToObject(root, "jobs", jobs);

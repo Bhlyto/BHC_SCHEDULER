@@ -51,9 +51,8 @@ int main(void)
         strncpy(job->batch_id, batch.id, sizeof(job->batch_id) - 1);
         if (db_update_job_batch_id(job->id, batch.id) != 0) return 1;
         if (i == 0) {
-            job_set_status(job, JOB_STATUS_STARTING);
             job_set_status(job, JOB_STATUS_RUNNING);
-            job_set_status(job, JOB_STATUS_FINISHED);
+            job_set_status(job, JOB_STATUS_SUCCEEDED);
         }
         job_free(job);
     }

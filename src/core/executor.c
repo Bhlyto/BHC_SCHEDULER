@@ -176,11 +176,18 @@ static int job_is_terminal_in_db(const char *job_id)
 {
     Job *persisted = db_get_job(job_id);
     if (!persisted) return 1;
-    int terminal = persisted->status == JOB_STATUS_FINISHED ||
+    int terminal = persisted->status == JOB_STATUS_SUCCEEDED ||
                    persisted->status == JOB_STATUS_FAILED ||
                    persisted->status == JOB_STATUS_CANCELLED;
     job_free(persisted);
     return terminal;
+}
+
+static void mark_job_running(Job *job)
+{
+    job->started_at = time(NULL);
+    if (job_set_status(job, JOB_STATUS_RUNNING) == 0)
+        db_update_job_started(job->id, job->machine_id, job->started_at);
 }
 
 /* ── Auto-deprovision helper ──────────────────────────────────────────── */
@@ -486,7 +493,7 @@ static DWORD WINAPI watcher_thread(LPVOID arg)
         wa->job->exit_code = (int)exit_code;
         char reason[280];
         if (exit_code == 0) {
-            job_set_status_r(wa->job, JOB_STATUS_FINISHED, "Completed successfully");
+            job_set_status_r(wa->job, JOB_STATUS_SUCCEEDED, "Completed successfully");
         } else if (wa->is_remote) {
             _snprintf(reason, sizeof(reason), "Process exited with code %lu on %s",
                       exit_code, wa->remote_host);
@@ -825,7 +832,7 @@ static int spawn_process(Job *job)
         return -1;
     }
     if (!job_is_terminal_in_db(job->id))
-        job_set_status(job, JOB_STATUS_RUNNING);
+        mark_job_running(job);
     else
         executor_terminate(job->id);
     HANDLE th = CreateThread(NULL, 0, watcher_thread, wa, 0, NULL);
@@ -921,7 +928,7 @@ static void *watcher_thread(void *arg)
         wa->job->exit_code = exit_code;
         char reason[280];
         if (exit_code == 0) {
-            job_set_status_r(wa->job, JOB_STATUS_FINISHED, "Completed successfully");
+            job_set_status_r(wa->job, JOB_STATUS_SUCCEEDED, "Completed successfully");
         } else if (wa->is_remote) {
             snprintf(reason, sizeof(reason), "Process exited with code %d on %s",
                      exit_code, wa->remote_host);
@@ -1011,7 +1018,7 @@ static int spawn_process(Job *job)
         wa->remote_output[0]    = '\0';
         wa->known_hosts_path[0] = '\0';
         if (!job_is_terminal_in_db(job->id))
-            job_set_status(job, JOB_STATUS_RUNNING);
+            mark_job_running(job);
         else
             executor_terminate(job->id);
         pthread_t th;
@@ -1134,7 +1141,7 @@ static int spawn_process(Job *job)
     strncpy(wa->remote_output,      remote_output,    sizeof(wa->remote_output)    - 1);
     strncpy(wa->known_hosts_path,   known_hosts_path, sizeof(wa->known_hosts_path) - 1);
     if (!job_is_terminal_in_db(job->id))
-        job_set_status(job, JOB_STATUS_RUNNING);
+        mark_job_running(job);
     else
         executor_terminate(job->id);
     pthread_t th;
@@ -1189,10 +1196,6 @@ int executor_spawn(Job *job)
     store_init_job_dirs(job->id);
     store_input_dir (job->id, job->input_dir,  sizeof(job->input_dir));
     store_output_dir(job->id, job->output_dir, sizeof(job->output_dir));
-
-    job_set_status(job, JOB_STATUS_STARTING);
-    db_update_job_started(job->id, job->machine_id, time(NULL));
-    job->started_at = time(NULL);
 
     /* Hand off to a launcher thread so the scheduler is never blocked
      * by SSH mkdir / SCP upload operations (which can each take seconds). */

@@ -9,13 +9,13 @@
 #define JOB_APP_LEN  128
 
 typedef enum {
-    JOB_STATUS_IN_QUEUE  = 0,
-    JOB_STATUS_STARTING  = 1,
+    JOB_STATUS_QUEUED    = 0,
+    /* value 1 was STARTING before v1 and is reserved for DB migration */
     JOB_STATUS_RUNNING   = 2,
-    JOB_STATUS_FINISHED  = 3,
+    JOB_STATUS_SUCCEEDED = 3,
     JOB_STATUS_CANCELLED = 4,
     JOB_STATUS_FAILED    = 5,
-    JOB_STATUS_HELD      = 6
+    JOB_STATUS_CREATED   = 6
 } JobStatus;
 
 typedef struct {

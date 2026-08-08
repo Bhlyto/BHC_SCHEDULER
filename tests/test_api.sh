@@ -37,7 +37,7 @@ wait_job() {
     while [ $(date +%s) -lt $deadline ]; do
         sleep 0.5
         local r; r=$(req GET "/jobs/$id")
-        echo "$r" | grep -qE 'FINISHED|FAILED|CANCELLED' && { echo "$r"; return; }
+        echo "$r" | grep -qE 'SUCCEEDED|FAILED|CANCELLED' && { echo "$r"; return; }
     done
     req GET "/jobs/$id"
 }
@@ -66,13 +66,13 @@ check 'Bonne clé → 200 sur /jobs' '200' "$code"
 echo -e "\n${CYA}══ 2. Soumission de job${RST}"
 
 r=$(req POST '/jobs' '{"command":"echo hello","priority":10,"cores":1,"ram_mb":64}')
-check 'Soumission minimale → IN_QUEUE'     'IN_QUEUE' "$r"
+check 'Soumission minimale → QUEUED'       'QUEUED' "$r"
 check 'Réponse contient un id UUID'         '[0-9a-f-]{36}' "$r"
 JOB_BASIC=$(echo "$r" | grep -oE '"id":"[^"]+"' | head -1 | cut -d'"' -f4)
 echo "  Job ID basique: $JOB_BASIC"
 
 r=$(req POST '/jobs' '{"command":"echo full","priority":5,"cores":1,"gpu":0,"ram_mb":128,"disk_mb":256}')
-check 'Soumission avec tous les champs → IN_QUEUE' 'IN_QUEUE' "$r"
+check 'Soumission avec tous les champs → QUEUED' 'QUEUED' "$r"
 
 r=$(req POST '/jobs' '{"priority":1}')
 check 'Sans command → erreur 400'           '400|error|command' "$r"
@@ -88,7 +88,7 @@ check 'GET /jobs contient le job soumis'    "$JOB_BASIC" "$r"
 r=$(req GET "/jobs/$JOB_BASIC")
 check 'GET /jobs/:id retourne le bon id'    "$JOB_BASIC" "$r"
 check 'GET /jobs/:id contient command'      'echo hello' "$r"
-check 'GET /jobs/:id contient status'       'IN_QUEUE|STARTING|RUNNING|FINISHED|FAILED' "$r"
+check 'GET /jobs/:id contient status'       'QUEUED|RUNNING|SUCCEEDED|FAILED' "$r"
 
 r=$(req GET '/jobs/JOB_ID')
 check 'Job inexistant → 404'                '404|not.found' "$r"
@@ -99,7 +99,7 @@ check 'Job inexistant → 404'                '404|not.found' "$r"
 echo -e "\n${CYA}══ 4. Exécution — job simple${RST}"
 
 r=$(wait_job "$JOB_BASIC")
-check 'Job echo hello → FINISHED'          'FINISHED' "$r"
+check 'Job echo hello → SUCCEEDED'         'SUCCEEDED' "$r"
 check 'Exit code = 0'                       '"exit_code":0' "$r"
 check 'machine_id renseigné'                'machine_id' "$r"
 
@@ -115,7 +115,7 @@ echo -e "\n${CYA}══ 5. Logs du job${RST}"
 
 r=$(req POST '/jobs' '{"command":"echo stdout_test; echo stderr_test >&2","priority":1,"cores":1,"ram_mb":64}')
 LOG_ID=$(echo "$r" | grep -oE '"id":"[^"]+"' | head -1 | cut -d'"' -f4)
-r=$(wait_job "$LOG_ID" ); check 'Job log → FINISHED' 'FINISHED' "$r"
+r=$(wait_job "$LOG_ID" ); check 'Job log → SUCCEEDED' 'SUCCEEDED' "$r"
 
 stdout_content=$(curl -s "$BASE/jobs/$LOG_ID/log" -H "X-API-Key: $KEY")
 stdout_code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/jobs/$LOG_ID/log" -H "X-API-Key: $KEY")
@@ -143,7 +143,7 @@ r=$(curl -s -X POST "$BASE/jobs/$IO_ID/input/data.txt" \
     -H "X-API-Key: $KEY" --data-binary @/tmp/orch_test_data.txt)
 check 'Upload input → bytes > 0'            'bytes' "$r"
 
-r=$(wait_job "$IO_ID" 20); check 'Job avec input → FINISHED' 'FINISHED' "$r"
+r=$(wait_job "$IO_ID" 20); check 'Job avec input → SUCCEEDED' 'SUCCEEDED' "$r"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/jobs/$IO_ID/output" -H "X-API-Key: $KEY")
 if [ "$code" = '200' ]; then pass 'Download output → 200'
@@ -242,7 +242,7 @@ r=$(req POST '/jobs' '{"command":"echo high",  "priority":1,  "cores":1,"ram_mb"
 HIGH_ID=$(echo "$r" | grep -oE '"id":"[^"]+"' | head -1 | cut -d'"' -f4)
 
 r=$(wait_job "$HIGH_ID" 15)
-check 'Job haute priorité → FINISHED'       'FINISHED' "$r"
+check 'Job haute priorité → SUCCEEDED'      'SUCCEEDED' "$r"
 
 # ╔══════════════════════════════════════════╗
 # ║  14. PURGE                               ║
@@ -299,7 +299,7 @@ r=$(curl -s -X POST "$BASE/jobs" \
     -H "X-API-Key: $KEY" \
     -H "Content-Type: application/json" \
     -d '{"command":"echo hello","priority":10,"cores":1,"ram_mb":64}')
-check "201 created" "IN_QUEUE" "$r"
+check "201 created" "QUEUED" "$r"
 JOB_ID=$(echo "$r" | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
 echo "  Job ID: $JOB_ID"
 
@@ -333,14 +333,14 @@ check "Resources list" "cores_total" "$r"
 
 # ── Wait for job to finish ────────────────────────
 echo ""
-echo "-- Wait for FINISHED (up to 10s) --"
+echo "-- Wait for SUCCEEDED (up to 10s) --"
 for i in $(seq 1 20); do
     STATUS=$(curl -s "$BASE/jobs/$JOB_ID" -H "X-API-Key: $KEY" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
     echo "  status: $STATUS"
-    if [ "$STATUS" = "FINISHED" ] || [ "$STATUS" = "FAILED" ]; then break; fi
+    if [ "$STATUS" = "SUCCEEDED" ] || [ "$STATUS" = "FAILED" ]; then break; fi
     sleep 0.5
 done
-check "Job reached terminal state" "FINISHED\|FAILED" "$STATUS"
+check "Job reached terminal state" "SUCCEEDED\|FAILED" "$STATUS"
 
 # ── Provision: add machine ────────────────────────
 echo ""

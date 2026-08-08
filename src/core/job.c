@@ -41,10 +41,9 @@
 static int transition_allowed(JobStatus from, JobStatus to)
 {
     switch (from) {
-        case JOB_STATUS_HELD:      return to == JOB_STATUS_IN_QUEUE   || to == JOB_STATUS_CANCELLED;
-        case JOB_STATUS_IN_QUEUE:  return to == JOB_STATUS_STARTING  || to == JOB_STATUS_CANCELLED;
-        case JOB_STATUS_STARTING:  return to == JOB_STATUS_RUNNING   || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
-        case JOB_STATUS_RUNNING:   return to == JOB_STATUS_FINISHED  || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
+        case JOB_STATUS_CREATED:   return to == JOB_STATUS_QUEUED    || to == JOB_STATUS_CANCELLED;
+        case JOB_STATUS_QUEUED:    return to == JOB_STATUS_RUNNING   || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
+        case JOB_STATUS_RUNNING:   return to == JOB_STATUS_SUCCEEDED || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
         default:                   return 0; /* terminal states */
     }
 }
@@ -52,11 +51,10 @@ static int transition_allowed(JobStatus from, JobStatus to)
 const char *job_status_str(JobStatus s)
 {
     switch (s) {
-        case JOB_STATUS_HELD:      return "HELD";
-        case JOB_STATUS_IN_QUEUE:  return "IN_QUEUE";
-        case JOB_STATUS_STARTING:  return "STARTING";
+        case JOB_STATUS_CREATED:   return "CREATED";
+        case JOB_STATUS_QUEUED:    return "QUEUED";
         case JOB_STATUS_RUNNING:   return "RUNNING";
-        case JOB_STATUS_FINISHED:  return "FINISHED";
+        case JOB_STATUS_SUCCEEDED: return "SUCCEEDED";
         case JOB_STATUS_CANCELLED: return "CANCELLED";
         case JOB_STATUS_FAILED:    return "FAILED";
         default:                   return "UNKNOWN";
@@ -84,7 +82,7 @@ Job *job_create_ex(const char *command, int priority,
     strncpy(job->command, command, sizeof(job->command) - 1);
     if (user_id) strncpy(job->user_id, user_id, sizeof(job->user_id) - 1);
     if (app_id)  strncpy(job->app_id,  app_id,  sizeof(job->app_id)  - 1);
-    job->status      = JOB_STATUS_IN_QUEUE;
+    job->status      = JOB_STATUS_QUEUED;
     job->priority    = priority;
     job->req_cores   = req_cores  > 0 ? req_cores  : 1;
     job->req_gpu     = req_gpu    > 0 ? req_gpu     : 0;
@@ -133,7 +131,7 @@ int job_set_status_r(Job *job, JobStatus new_status, const char *reason)
 
     time_t now = time(NULL);
     switch (new_status) {
-        case JOB_STATUS_FINISHED:
+        case JOB_STATUS_SUCCEEDED:
         case JOB_STATUS_CANCELLED:
         case JOB_STATUS_FAILED:
             job->ended_at = now;

@@ -52,8 +52,8 @@ function fmtDate(ts) {
   return new Date(ts * 1000).toLocaleString();
 }
 function statusBadge(s) {
-  const cls = { RUNNING:'running', IN_QUEUE:'queued', QUEUED:'queued', FINISHED:'finished', FAILED:'failed',
-                HELD:'held', CANCELLED:'cancelled', STARTING:'starting' }[s] || 'queued';
+  const cls = { RUNNING:'running', QUEUED:'queued', SUCCEEDED:'finished', FAILED:'failed',
+                CREATED:'held', CANCELLED:'cancelled' }[s] || 'queued';
   return '<span class="badge badge-' + cls + '">' + s + '</span>';
 }
 function shortId(id) { return id ? id.substring(0, 8) : '—'; }
