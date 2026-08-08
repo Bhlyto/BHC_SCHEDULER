@@ -2937,6 +2937,9 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
             if (strcmp(method, "GET") == 0 && strcmp(seg[2], "files") == 0 && seg[3][0] == '\0') {
                 list_job_files(c, hm, seg[1]); return;
             }
+            if (strcmp(method, "GET") == 0 && strcmp(seg[2], "artifacts") == 0 && seg[3][0] == '\0') {
+                artifacts_list(c, seg[1]); return;
+            }
             if (strcmp(method, "GET") == 0 && strcmp(seg[2], "deps") == 0 && seg[3][0] == '\0') {
                 get_job_deps(c, hm, seg[1]); return;
             }

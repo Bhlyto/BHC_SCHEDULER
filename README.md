@@ -13,7 +13,7 @@ A lightweight daemon written in C that exposes a REST API for submitting, tracki
 - **Multi-machine jobs** — when no single machine can satisfy a core request, the allocator can spread the job across multiple machines automatically
 - **Machine pools** — define hundreds of machines compactly in `provisioning.json` using prefix/format ranges; add or remove machines at runtime without restart
 - **Application definitions** — define apps as JSON files with pre-set resource requirements and dynamic form fields; users pick an app when submitting a job
-- **File I/O** — upload input files before a job runs; download output files after it finishes; list all files for a job via API
+- **Artifact metadata** — persist URIs and sizes for stdout, stderr, and recursively collected output files without turning the scheduler into a storage system
 - **HELD jobs** — submit a job with expected input files; it stays in `HELD` state until all files are uploaded, then auto-releases to the queue
 - **Job logs** — stdout and stderr of each job are captured and retrievable via API
 - **Pre-job scripts** — run a setup script before each job; receives job context via environment variables

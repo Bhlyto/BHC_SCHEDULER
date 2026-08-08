@@ -59,11 +59,13 @@ set(CORE_SOURCES
     src/core/scheduler.c
     src/core/executor.c
     src/transfer/store.c
+    src/transfer/artifacts.c
     src/transfer/upload.c
     src/transfer/download.c
     src/http/auth.c
     src/http/routes.c
     src/http/batches.c
+    src/http/artifacts.c
     src/http/response.c
     src/http/httpd.c
     src/http/events.c
@@ -149,6 +151,14 @@ add_executable(batch_test
 target_include_directories(batch_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(batch_test ${PLATFORM_LIBS})
 
+add_executable(artifact_test
+    src/tools/artifact_test.c
+    ${CORE_SOURCES}
+    ${VENDOR_SOURCES}
+)
+target_include_directories(artifact_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(artifact_test ${PLATFORM_LIBS})
+
 if(BUILD_TESTING)
     add_test(NAME decision_core COMMAND $<TARGET_FILE:dc_test>)
     add_test(NAME presim_e2e COMMAND $<TARGET_FILE:presim_e2e_test>)
@@ -157,8 +167,9 @@ if(BUILD_TESTING)
     add_test(NAME recovery COMMAND $<TARGET_FILE:recovery_test>)
     add_test(NAME queue COMMAND $<TARGET_FILE:queue_test>)
     add_test(NAME batch COMMAND $<TARGET_FILE:batch_test>)
+    add_test(NAME artifact COMMAND $<TARGET_FILE:artifact_test>)
 
-    set_tests_properties(decision_core presim_e2e lifecycle allocator recovery queue batch PROPERTIES
+    set_tests_properties(decision_core presim_e2e lifecycle allocator recovery queue batch artifact PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     )
 endif()

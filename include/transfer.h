@@ -13,6 +13,12 @@ void store_stderr_path(const char *job_id, char *buf, int len);
 /* Copy all files from parent_job output dir into child_job input dir */
 int  store_forward_outputs(const char *parent_job_id, const char *child_job_id);
 
+/* Filesystem artifact backend. Metadata is persisted separately from bytes so
+   another storage backend can later provide URIs without changing scheduling. */
+int artifact_register_file(const char *job_id, const char *type,
+                           const char *path);
+int artifact_collect_job(const char *job_id);
+
 long upload_handle(const char *job_id, const char *filename,
                    const char *data, long data_len);
 int  download_handle(struct mg_connection *c, struct mg_http_message *hm,

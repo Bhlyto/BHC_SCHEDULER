@@ -177,6 +177,35 @@ Both return `text/plain`. Returns `404` if the log file does not exist yet.
 
 ---
 
+### List job artifacts
+```http
+GET /jobs/:id/artifacts
+```
+
+Returns persistent metadata collected when execution ends. The initial
+filesystem backend exposes local or shared-filesystem paths as URIs. `checksum`
+is reserved for storage backends that compute one and is otherwise `null`.
+
+```json
+[
+  {
+    "id": 17,
+    "job_id": "<job-id>",
+    "type": "output",
+    "uri": "work/<job-id>/output/results.json",
+    "size_bytes": 2048,
+    "checksum": null,
+    "created_at": 1786183200
+  }
+]
+```
+
+Artifact types in v1 are `stdout`, `stderr`, and `output`. Output directories
+are scanned recursively. Recollection is idempotent for the same
+job/type/URI tuple.
+
+---
+
 ### List job files
 ```http
 GET /jobs/:id/files

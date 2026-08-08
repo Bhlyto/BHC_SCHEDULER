@@ -61,6 +61,21 @@ int db_insert_batch(const BatchRecord *batch);
 int db_get_batch(const char *batch_id, BatchRecord *out);
 int db_get_batch_stats(const char *batch_id, BatchStats *out);
 
+typedef struct {
+    long long id;
+    char job_id[37];
+    char type[32];
+    char uri[1024];
+    long long size_bytes;
+    char checksum[65];
+    time_t created_at;
+} ArtifactRecord;
+
+/* Insert or refresh metadata for one physical artifact. The (job,type,uri)
+   tuple is stable, so repeated collection after a restart is idempotent. */
+int db_upsert_artifact(ArtifactRecord *artifact);
+int db_list_artifacts(const char *job_id, ArtifactRecord *out, int max_count);
+
 int  db_insert_api_key(const char *key_hash, const char *label);
 int  db_insert_api_key_ex(const char *key_hash, const char *label,
                          const char *role, time_t expires_at);

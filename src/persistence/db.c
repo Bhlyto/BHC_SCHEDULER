@@ -58,6 +58,18 @@ static const char *SCHEMA =
     "  created_at INTEGER NOT NULL"
     ");"
 
+    "CREATE TABLE IF NOT EXISTS artifacts ("
+    "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  job_id     TEXT NOT NULL,"
+    "  type       TEXT NOT NULL,"
+    "  uri        TEXT NOT NULL,"
+    "  size_bytes INTEGER NOT NULL DEFAULT 0,"
+    "  checksum   TEXT NOT NULL DEFAULT '',"
+    "  created_at INTEGER NOT NULL,"
+    "  UNIQUE(job_id,type,uri)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_artifacts_job ON artifacts(job_id,id);"
+
     "CREATE TABLE IF NOT EXISTS audit_log ("
     "  id        INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  event     TEXT NOT NULL,"
@@ -546,6 +558,71 @@ int db_get_batch_stats(const char *batch_id, BatchStats *out)
     }
     sqlite3_finalize(st);
     return 0;
+}
+
+int db_upsert_artifact(ArtifactRecord *artifact)
+{
+    const char *sql =
+        "INSERT INTO artifacts(job_id,type,uri,size_bytes,checksum,created_at)"
+        " VALUES(?,?,?,?,?,?)"
+        " ON CONFLICT(job_id,type,uri) DO UPDATE SET"
+        " size_bytes=excluded.size_bytes,checksum=excluded.checksum;";
+    sqlite3_stmt *st = NULL;
+    if (!artifact || sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, artifact->job_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, artifact->type, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, artifact->uri, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 4, (sqlite3_int64)artifact->size_bytes);
+    sqlite3_bind_text(st, 5, artifact->checksum, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 6, (sqlite3_int64)artifact->created_at);
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) return -1;
+
+    sql = "SELECT id,created_at FROM artifacts WHERE job_id=? AND type=? AND uri=?;";
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_text(st, 1, artifact->job_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, artifact->type, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, artifact->uri, -1, SQLITE_STATIC);
+    rc = -1;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        artifact->id = (long long)sqlite3_column_int64(st, 0);
+        artifact->created_at = (time_t)sqlite3_column_int64(st, 1);
+        rc = 0;
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
+int db_list_artifacts(const char *job_id, ArtifactRecord *out, int max_count)
+{
+    const char *sql =
+        "SELECT id,job_id,type,uri,size_bytes,checksum,created_at"
+        " FROM artifacts WHERE job_id=? ORDER BY id;";
+    sqlite3_stmt *st = NULL;
+    if (!job_id || !out || max_count <= 0 ||
+        sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, job_id, -1, SQLITE_STATIC);
+    int count = 0;
+    while (count < max_count && sqlite3_step(st) == SQLITE_ROW) {
+        ArtifactRecord *a = &out[count++];
+        memset(a, 0, sizeof(*a));
+        a->id = (long long)sqlite3_column_int64(st, 0);
+        const char *s = (const char *)sqlite3_column_text(st, 1);
+        if (s) strncpy(a->job_id, s, sizeof(a->job_id) - 1);
+        s = (const char *)sqlite3_column_text(st, 2);
+        if (s) strncpy(a->type, s, sizeof(a->type) - 1);
+        s = (const char *)sqlite3_column_text(st, 3);
+        if (s) strncpy(a->uri, s, sizeof(a->uri) - 1);
+        a->size_bytes = (long long)sqlite3_column_int64(st, 4);
+        s = (const char *)sqlite3_column_text(st, 5);
+        if (s) strncpy(a->checksum, s, sizeof(a->checksum) - 1);
+        a->created_at = (time_t)sqlite3_column_int64(st, 6);
+    }
+    sqlite3_finalize(st);
+    return count;
 }
 
 int db_insert_api_key(const char *key_hash, const char *label)

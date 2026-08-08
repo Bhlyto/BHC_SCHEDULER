@@ -517,6 +517,9 @@ static DWORD WINAPI watcher_thread(LPVOID arg)
         }
     }
 
+    if (artifact_collect_job(wa->job->id) < 0)
+        log_warn("executor", "Artifact collection failed for job %s", wa->job->id);
+
     db_release_allocation(wa->job->id);
     alloc_release(wa->job->id);
     maybe_auto_deprovision(wa->job->machine_id);
@@ -950,6 +953,9 @@ static void *watcher_thread(void *arg)
             job_set_status_r(wa->job, JOB_STATUS_FAILED, reason);
         }
     }
+
+    if (artifact_collect_job(wa->job->id) < 0)
+        log_warn("executor", "Artifact collection failed for job %s", wa->job->id);
 
     db_release_allocation(wa->job->id);
     alloc_release(wa->job->id);

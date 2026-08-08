@@ -65,5 +65,6 @@ void batches_submit(struct mg_connection *c, struct mg_http_message *hm,
                     const char *auth_user_id);
 void batches_get(struct mg_connection *c, const char *batch_id,
                  const char *auth_user_id, const char *auth_role);
+void artifacts_list(struct mg_connection *c, const char *job_id);
 
 #endif /* HTTP_H */
