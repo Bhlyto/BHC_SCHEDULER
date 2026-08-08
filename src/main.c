@@ -62,7 +62,11 @@ void orchestrator_run(void)
         log_info("main", "%d machine(s) loaded from %s", machine_count, g_config.provisioning_json);
 
     events_init();
-    scheduler_init();
+    if (!scheduler_init()) {
+        log_error("main", "Failed to initialize scheduler");
+        db_close();
+        return;
+    }
     scheduler_start();
     log_info("main", "Scheduler started");
 

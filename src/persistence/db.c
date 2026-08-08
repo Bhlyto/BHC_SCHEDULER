@@ -380,6 +380,68 @@ int db_list_running_jobs(Job *jobs, int max_count)
     return count;
 }
 
+int db_list_queued_jobs(Job *jobs, int max_count, int offset)
+{
+    const char *sql =
+        "SELECT id,command,status,priority,req_cores,req_gpu,req_ram_mb,"
+        "req_disk_mb,machine_id,input_dir,output_dir,exit_code,"
+        "submitted_at,started_at,ended_at,input_files,timeout_seconds,status_reason,"
+        "user_id,app_id,depends_on,workflow_id,same_machine_as FROM jobs"
+        " WHERE status=0 ORDER BY priority ASC,submitted_at ASC,id ASC"
+        " LIMIT ? OFFSET ?;";
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int(st, 1, max_count);
+    sqlite3_bind_int(st, 2, offset);
+    int count = 0;
+    while (count < max_count && sqlite3_step(st) == SQLITE_ROW) {
+        Job *tmp = row_to_job(st);
+        if (tmp) { jobs[count++] = *tmp; free(tmp); }
+    }
+    sqlite3_finalize(st);
+    return count;
+}
+
+int db_recover_incomplete_jobs(void)
+{
+    char *errmsg = NULL;
+    if (sqlite3_exec(s_db, "BEGIN IMMEDIATE;", NULL, NULL, &errmsg) != SQLITE_OK) {
+        sqlite3_free(errmsg);
+        return -1;
+    }
+
+    sqlite3_stmt *st = NULL;
+    const char *sql =
+        "UPDATE jobs SET status=?,exit_code=-1,ended_at=strftime('%s','now'),"
+        "status_reason=? WHERE status IN (?,?);";
+    if (sqlite3_prepare_v2(s_db, sql, -1, &st, NULL) != SQLITE_OK) goto rollback;
+    sqlite3_bind_int(st, 1, JOB_STATUS_FAILED);
+    sqlite3_bind_text(st, 2, "Scheduler restarted while job was active",
+                      -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 3, JOB_STATUS_STARTING);
+    sqlite3_bind_int(st, 4, JOB_STATUS_RUNNING);
+    if (sqlite3_step(st) != SQLITE_DONE) goto rollback;
+    sqlite3_finalize(st);
+    st = NULL;
+    int recovered = sqlite3_changes(s_db);
+
+    if (sqlite3_exec(s_db,
+            "UPDATE allocations SET released_at=strftime('%s','now')"
+            " WHERE released_at IS NULL;",
+            NULL, NULL, &errmsg) != SQLITE_OK) {
+        sqlite3_free(errmsg);
+        goto rollback;
+    }
+    if (sqlite3_exec(s_db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
+        goto rollback;
+    return recovered;
+
+rollback:
+    if (st) sqlite3_finalize(st);
+    sqlite3_exec(s_db, "ROLLBACK;", NULL, NULL, NULL);
+    return -1;
+}
+
 int db_insert_api_key(const char *key_hash, const char *label)
 {
     return db_insert_api_key_ex(key_hash, label, "admin", 0);

@@ -741,6 +741,35 @@ static void *scheduler_thread(void *arg)
 Queue *scheduler_init(void)
 {
     s_queue = queue_create(64);
+    if (!s_queue) return NULL;
+
+    int recovered = db_recover_incomplete_jobs();
+    if (recovered > 0)
+        log_warn("scheduler", "Marked %d interrupted job(s) as FAILED", recovered);
+
+    enum { RECOVERY_PAGE_SIZE = 256 };
+    Job *page = (Job *)malloc(RECOVERY_PAGE_SIZE * sizeof(Job));
+    if (!page) {
+        queue_destroy(s_queue);
+        s_queue = NULL;
+        return NULL;
+    }
+    int offset = 0;
+    for (;;) {
+        int count = db_list_queued_jobs(page, RECOVERY_PAGE_SIZE, offset);
+        for (int i = 0; i < count; i++) {
+            Job *job = (Job *)malloc(sizeof(Job));
+            if (!job) continue;
+            *job = page[i];
+            if (queue_push(s_queue, job) != 0) job_free(job);
+        }
+        offset += count;
+        if (count < RECOVERY_PAGE_SIZE) break;
+    }
+    free(page);
+    if (offset > 0)
+        log_info("scheduler", "Recovered %d queued job(s) from SQLite", offset);
+
     /* Initialize decision core (config_path optional) */
     decision_core_init(NULL);
     return s_queue;

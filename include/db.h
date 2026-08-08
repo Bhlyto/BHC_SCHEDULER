@@ -30,6 +30,11 @@ Job *db_get_job(const char *job_id);
 int  db_list_jobs(Job *jobs, int max_count);
 int  db_list_held_jobs(Job *jobs, int max_count);
 int  db_list_running_jobs(Job *jobs, int max_count);
+int  db_list_queued_jobs(Job *jobs, int max_count, int offset);
+
+/* Mark STARTING/RUNNING jobs as failed after a scheduler restart and release
+   their persisted allocations. Returns the number of recovered jobs. */
+int  db_recover_incomplete_jobs(void);
 
 int  db_insert_api_key(const char *key_hash, const char *label);
 int  db_insert_api_key_ex(const char *key_hash, const char *label,

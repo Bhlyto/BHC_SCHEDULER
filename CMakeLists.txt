@@ -124,13 +124,22 @@ add_executable(allocator_test
 target_include_directories(allocator_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(allocator_test ${PLATFORM_LIBS})
 
+add_executable(recovery_test
+    src/tools/recovery_test.c
+    ${CORE_SOURCES}
+    ${VENDOR_SOURCES}
+)
+target_include_directories(recovery_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(recovery_test ${PLATFORM_LIBS})
+
 if(BUILD_TESTING)
     add_test(NAME decision_core COMMAND $<TARGET_FILE:dc_test>)
     add_test(NAME presim_e2e COMMAND $<TARGET_FILE:presim_e2e_test>)
     add_test(NAME lifecycle COMMAND $<TARGET_FILE:lifecycle_test>)
     add_test(NAME allocator COMMAND $<TARGET_FILE:allocator_test>)
+    add_test(NAME recovery COMMAND $<TARGET_FILE:recovery_test>)
 
-    set_tests_properties(decision_core presim_e2e lifecycle allocator PROPERTIES
+    set_tests_properties(decision_core presim_e2e lifecycle allocator recovery PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     )
 endif()
