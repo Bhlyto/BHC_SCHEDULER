@@ -106,10 +106,8 @@ static int count_present_files(const char *input_dir, const char *input_files)
 static int job_fits_available_resources(const Job *job, void *context)
 {
     (void)context;
-    if (alloc_can_fit(job->req_cores, job->req_gpu,
-                      job->req_ram_mb, job->req_disk_mb)) return 1;
-    return alloc_can_fit_multi(job->req_cores, job->req_gpu,
-                               job->req_ram_mb, job->req_disk_mb) > 0;
+    return alloc_can_fit(job->req_cores, job->req_gpu,
+                         job->req_ram_mb, job->req_disk_mb);
 }
 
 /* ── Periodic: check all HELD jobs and release those whose files are ready ── */
@@ -382,7 +380,6 @@ static void *scheduler_thread(void *arg)
                                      job->req_cores, job->req_gpu,
                                      job->req_ram_mb, job->req_disk_mb) == 0) {
                     strncpy(job->machine_id, ref->machine_id, sizeof(job->machine_id) - 1);
-                    job->n_machines = 1;
                     log_info("scheduler", "Dispatching job %s to %s (same-machine affinity with %s)",
                              job->id, ref->machine_id, ref->id);
                     free(ref);
@@ -618,14 +615,10 @@ static void *scheduler_thread(void *arg)
             }
         }
 
-        int can_single = alloc_can_fit(job->req_cores, job->req_gpu,
-                                        job->req_ram_mb, job->req_disk_mb);
-        int can_multi  = !can_single
-                       ? alloc_can_fit_multi(job->req_cores, job->req_gpu,
-                                             job->req_ram_mb, job->req_disk_mb)
-                       : 0;
+        int can_run = alloc_can_fit(job->req_cores, job->req_gpu,
+                                    job->req_ram_mb, job->req_disk_mb);
 
-        if (!can_single && !can_multi) {
+        if (!can_run) {
             /* ── Auto-provision a cloud machine if enabled ──────── */
             if (g_config.cloud_auto_provision &&
                 g_config.cloud_default_provider[0] &&
@@ -685,7 +678,7 @@ static void *scheduler_thread(void *arg)
         }
 
         int dispatched = 0;
-        if (can_single) {
+        if (can_run) {
             char machine_id[64] = {0};
             if (alloc_reserve(job->id,
                               job->req_cores, job->req_gpu,
@@ -701,26 +694,9 @@ static void *scheduler_thread(void *arg)
                     alloc_release(job->id);
                 } else {
                     strncpy(job->machine_id, machine_id, sizeof(job->machine_id) - 1);
-                    job->n_machines = 1;
                     log_info("scheduler", "Dispatching job %s to %s", job->id, machine_id);
                     dispatched = 1;
                 }
-            }
-        }
-
-        if (!dispatched && can_multi) {
-            char machine_ids[1024] = {0};
-            int  n_machines = 0;
-            if (alloc_reserve_multi(job->id,
-                                    job->req_cores, job->req_gpu,
-                                    job->req_ram_mb, job->req_disk_mb,
-                                    machine_ids, &n_machines) == 0) {
-                strncpy(job->machine_id, machine_ids, sizeof(job->machine_id) - 1);
-                job->n_machines = n_machines;
-                log_info("scheduler",
-                         "Dispatching job %s across %d machines: %s",
-                         job->id, n_machines, machine_ids);
-                dispatched = 1;
             }
         }
 
@@ -732,8 +708,8 @@ static void *scheduler_thread(void *arg)
         /* ── Record dispatch event ──────────────────────────── */
         {
             char detail[256];
-            snprintf(detail, sizeof(detail), "Dispatched to %s (%d machine(s))",
-                     job->machine_id, job->n_machines);
+            snprintf(detail, sizeof(detail), "Dispatched to worker %s",
+                     job->machine_id);
             events_push_persistent("job", "dispatch", detail, job->user_id);
             db_insert_event("job", "dispatch", detail,
                             job->user_id, job->id, job->machine_id);

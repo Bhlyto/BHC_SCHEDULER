@@ -30,23 +30,6 @@ static void cleanup(void)
     remove("allocator_machines.json");
 }
 
-static int allocation_row_count(const char *job_id)
-{
-    sqlite3 *db = NULL;
-    sqlite3_stmt *st = NULL;
-    int count = -1;
-    if (sqlite3_open("allocator_test.db", &db) != SQLITE_OK) return -1;
-    if (sqlite3_prepare_v2(db,
-            "SELECT COUNT(*) FROM allocations WHERE job_id=?;",
-            -1, &st, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(st, 1, job_id, -1, SQLITE_STATIC);
-        if (sqlite3_step(st) == SQLITE_ROW) count = sqlite3_column_int(st, 0);
-    }
-    sqlite3_finalize(st);
-    sqlite3_close(db);
-    return count;
-}
-
 int main(void)
 {
     cleanup();
@@ -117,23 +100,10 @@ int main(void)
         return 1;
     }
 
-    char machine_ids[1024];
-    int n_machines = 0;
-    if (alloc_reserve_multi("multi-job", 6, 0, 32, 32,
-                            machine_ids, &n_machines) != 0 || n_machines != 2) {
-        fprintf(stderr, "multi-machine reservation failed\n");
-        db_close();
-        cleanup();
-        return 1;
-    }
-    if (allocation_row_count("multi-job") != 2) {
-        fprintf(stderr, "multi-machine allocations were not persisted separately\n");
-        db_close();
-        cleanup();
-        return 1;
-    }
-    if (alloc_release("multi-job") != 0) {
-        fprintf(stderr, "multi-machine release failed\n");
+    char machine_id[64];
+    if (alloc_can_fit(6, 0, 32, 32) != 0 ||
+        alloc_reserve("oversized-job", 6, 0, 32, 32, machine_id) == 0) {
+        fprintf(stderr, "a job was incorrectly split across workers\n");
         db_close();
         cleanup();
         return 1;

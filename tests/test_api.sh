@@ -231,24 +231,6 @@ check 'SSE reçoit un événement job_status'  'job_status|data:' "$sse_data"
 # ╔══════════════════════════════════════════╗
 # ║  12. MULTI-MACHINE                       ║
 # ╚══════════════════════════════════════════╝
-echo -e "\n${CYA}══ 12. Multi-machine${RST}"
-
-req POST '/provision' '{"id":"mm-node1","hostname":"mm-node1","ip":"10.0.0.1","cores":2,"ram_mb":4096,"disk_mb":51200}' > /dev/null
-req POST '/provision' '{"id":"mm-node2","hostname":"mm-node2","ip":"10.0.0.2","cores":2,"ram_mb":4096,"disk_mb":51200}' > /dev/null
-
-r=$(req POST '/jobs' '{"command":"echo multi","priority":1,"cores":4,"ram_mb":256,"disk_mb":1024}')
-MM_ID=$(echo "$r" | grep -oE '"id":"[^"]+"' | head -1 | cut -d'"' -f4)
-check 'Job multi-machine → soumis'          'IN_QUEUE|STARTING|RUNNING' "$r"
-
-r=$(wait_job "$MM_ID" 20)
-check 'Job multi-machine → FINISHED'        'FINISHED' "$r"
-nm=$(echo "$r" | grep -oE '"n_machines":[0-9]+' | grep -oE '[0-9]+' || echo '1')
-if [ "$nm" -gt 1 ]; then pass "n_machines=$nm (multi-machine confirmé)"
-else skip 'Multi-machine effectif' "n_machines=$nm — machines locales peut-être suffisantes"; fi
-
-req DELETE '/provision/mm-node1' > /dev/null
-req DELETE '/provision/mm-node2' > /dev/null
-
 # ╔══════════════════════════════════════════╗
 # ║  13. PRIORITÉ                            ║
 # ╚══════════════════════════════════════════╝

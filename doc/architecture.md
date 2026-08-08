@@ -21,7 +21,7 @@ BHC_SCHEDULER/
 │   │   └── log.c               # Leveled logger
 │   ├── resources/
 │   │   ├── registry.c          # Machine registry, pool expansion
-│   │   ├── allocator.c         # Single-machine and multi-machine allocation
+│   │   ├── allocator.c         # Deterministic single-worker allocation
 │   │   └── probe.c             # TCP/ping/SSH probing, background sweep, Wake-on-LAN
 │   ├── cloud/
 │   │   └── cloud.c             # Cloud provisioning (AWS, GCP, Azure) via CLI

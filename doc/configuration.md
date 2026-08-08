@@ -56,7 +56,7 @@ cleanup_ttl_seconds   = 3600
 # ── Pre-job scripts ──────────────────────────────
 # Executed at the start of each job. Leave empty to disable.
 # Receives env vars: ORCH_JOB_ID, ORCH_INPUT_DIR, ORCH_OUTPUT_DIR,
-#                    ORCH_MACHINE_IDS, ORCH_MACHINE_COUNT
+#                    ORCH_WORKER_ID
 pre_job_script_win    = config\pre_job_script_win.bat
 pre_job_script_linux  =
 
@@ -191,8 +191,9 @@ For each job dispatched to a remote host, the orchestrator performs these steps 
 | `ORCH_JOB_ID` | UUID of the job |
 | `ORCH_INPUT_DIR` | Absolute path to the input directory on the remote host |
 | `ORCH_OUTPUT_DIR` | Absolute path to the output directory on the remote host |
-| `ORCH_MACHINE_IDS` | Comma-separated list of allocated machine IDs |
-| `ORCH_MACHINE_COUNT` | Number of allocated machines |
+| `ORCH_WORKER_ID` | ID of the worker allocated to this job |
+| `ORCH_MACHINE_IDS` | Compatibility alias for `ORCH_WORKER_ID` |
+| `ORCH_MACHINE_COUNT` | Compatibility value, always `1` in v1 |
 
 ### SSH key setup
 

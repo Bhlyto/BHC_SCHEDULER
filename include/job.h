@@ -31,8 +31,7 @@ typedef struct {
     int        req_ram_mb;
     int        req_disk_mb;
 
-    char       machine_id[1024]; /* comma-separated; multi-machine jobs */
-    int        n_machines;
+    char       machine_id[64]; /* exactly one worker owns a running job */
 
     char       input_dir[512];
     char       output_dir[512];

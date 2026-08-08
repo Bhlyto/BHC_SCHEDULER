@@ -293,24 +293,6 @@ try {
 # =============================================
 #  12. MULTI-MACHINE
 # =============================================
-Write-Host "`n-- 12. Multi-machine" -ForegroundColor Cyan
-
-Req POST "/provision" '{"id":"mm-node1","hostname":"mm-node1","ip":"10.0.0.1","cores":2,"ram_mb":4096,"disk_mb":51200}' | Out-Null
-Req POST "/provision" '{"id":"mm-node2","hostname":"mm-node2","ip":"10.0.0.2","cores":2,"ram_mb":4096,"disk_mb":51200}' | Out-Null
-
-$r = Req POST "/jobs" '{"command":"echo multi","priority":1,"cores":4,"ram_mb":256,"disk_mb":1024}'
-$mm_id = $r.id
-Check "Job multi-machine -> soumis"       "IN_QUEUE|STARTING|RUNNING" $r.status
-
-$r = WaitJob $mm_id 20
-Check "Job multi-machine -> FINISHED"     "FINISHED" $r.status
-$nm = [int]"$($r.n_machines)"
-if ($nm -gt 1) { Pass "n_machines=$nm (multi-machine confirme)" }
-else { Skip "Multi-machine effectif" "n_machines=$nm -- machines locales peut-etre suffisantes" }
-
-Req DELETE "/provision/mm-node1" | Out-Null
-Req DELETE "/provision/mm-node2" | Out-Null
-
 # =============================================
 #  13. PRIORITE
 # =============================================

@@ -189,18 +189,7 @@ static void maybe_auto_deprovision(const char *machine_id)
     if (!g_config.cloud_auto_deprovision) return;
     if (!machine_id || !machine_id[0]) return;
 
-    /* Parse first machine ID from comma-separated list */
-    char first_mid[64] = {0};
-    const char *comma = strchr(machine_id, ',');
-    if (comma) {
-        int len = (int)(comma - machine_id);
-        if (len > 63) len = 63;
-        memcpy(first_mid, machine_id, len);
-    } else {
-        strncpy(first_mid, machine_id, 63);
-    }
-
-    Machine *m = registry_get(first_mid);
+    Machine *m = registry_get(machine_id);
     if (!m || m->type != MACHINE_TYPE_CLOUD) return;
 
     /* Check if the machine still has reserved resources */
@@ -291,15 +280,6 @@ static int machine_host(const char *machine_id, char *out, int out_len)
             strcmp(out, "::1")       == 0);
 }
 
-/* Extract the first element of a comma-separated machine-id list. */
-static void first_machine(const char *csv, char *out, int out_len)
-{
-    strncpy(out, csv, out_len - 1);
-    out[out_len - 1] = '\0';
-    char *c = strchr(out, ',');
-    if (c) *c = '\0';
-}
-
 /* Build the SSH / SCP option string shared by every remote call.
  * known_hosts_path: path to a writable known_hosts file for this job.
  * Passing a per-job file (created empty before first SSH call) ensures
@@ -354,16 +334,16 @@ static int write_run_script(const Job *job,
         log_error("executor", "Cannot write run script: %s", script_path);
         return -1;
     }
-    char n_machines_str[8];
-    snprintf(n_machines_str, sizeof(n_machines_str), "%d", job->n_machines);
     char escaped_mid[512];
     shell_escape(job->machine_id, escaped_mid, sizeof(escaped_mid));
     fprintf(f, "#!/bin/sh\n");
     fprintf(f, "export ORCH_JOB_ID=\"%s\"\n",        job->id);
     fprintf(f, "export ORCH_INPUT_DIR=\"%s\"\n",     remote_input);
     fprintf(f, "export ORCH_OUTPUT_DIR=\"%s\"\n",    remote_output);
-    fprintf(f, "export ORCH_MACHINE_IDS=\"%s\"\n",   escaped_mid);
-    fprintf(f, "export ORCH_MACHINE_COUNT=\"%s\"\n", n_machines_str);
+    fprintf(f, "export ORCH_WORKER_ID=\"%s\"\n",    escaped_mid);
+    /* Compatibility aliases remain single-valued in v1. */
+    fprintf(f, "export ORCH_MACHINE_IDS=\"%s\"\n",  escaped_mid);
+    fprintf(f, "export ORCH_MACHINE_COUNT=\"1\"\n");
 
     /* Export app-specific environment from .app_env.json if present */
     {
@@ -535,10 +515,8 @@ static DWORD WINAPI watcher_thread(LPVOID arg)
 static int spawn_process(Job *job)
 {
     /* ── Determine target host ────────────────────────────────────── */
-    char first_mid[64];
-    first_machine(job->machine_id, first_mid, sizeof(first_mid));
     char host[256];
-    int local = machine_host(first_mid, host, sizeof(host));
+    int local = machine_host(job->machine_id, host, sizeof(host));
 
     /* Force local execution when no SSH user is configured */
     if (!g_config.ssh_user[0]) local = 1;
@@ -574,14 +552,13 @@ static int spawn_process(Job *job)
             const char *p = parent_env;
             while (*p) { size_t l = strlen(p) + 1; parent_sz += l; p += l; }
         }
-        char n_machines_str[8];
-        _snprintf(n_machines_str, sizeof(n_machines_str), "%d", job->n_machines);
         size_t extra_sz =
               strlen("ORCH_JOB_ID=")        + strlen(job->id)          + 1
             + strlen("ORCH_INPUT_DIR=")     + strlen(job->input_dir)   + 1
             + strlen("ORCH_OUTPUT_DIR=")    + strlen(job->output_dir)  + 1
+            + strlen("ORCH_WORKER_ID=")     + strlen(job->machine_id)  + 1
             + strlen("ORCH_MACHINE_IDS=")   + strlen(job->machine_id)  + 1
-            + strlen("ORCH_MACHINE_COUNT=") + strlen(n_machines_str)   + 1
+            + strlen("ORCH_MACHINE_COUNT=1") + 1
             + 2;
         size_t env_capacity = parent_sz + extra_sz;
         char *env_block = (char *)malloc(env_capacity);
@@ -605,8 +582,9 @@ static int spawn_process(Job *job)
         ADD_ENV("ORCH_JOB_ID",        job->id);
         ADD_ENV("ORCH_INPUT_DIR",     job->input_dir);
         ADD_ENV("ORCH_OUTPUT_DIR",    job->output_dir);
+        ADD_ENV("ORCH_WORKER_ID",     job->machine_id);
         ADD_ENV("ORCH_MACHINE_IDS",   job->machine_id);
-        ADD_ENV("ORCH_MACHINE_COUNT", n_machines_str);
+        ADD_ENV("ORCH_MACHINE_COUNT", "1");
         env_block[env_pos++] = '\0';
 #undef ADD_ENV
 
@@ -726,7 +704,7 @@ static int spawn_process(Job *job)
             "%s/%s/output", g_config.ssh_remote_work_dir, job->id);
 
         log_info("executor", "Job %s → remote %s (%s)",
-                 job->id, first_mid, host);
+                 job->id, job->machine_id, host);
 
         /* 1. Create remote directories */
         {
@@ -971,10 +949,8 @@ static void *watcher_thread(void *arg)
 static int spawn_process(Job *job)
 {
     /* ── Determine target host ────────────────────────────────────── */
-    char first_mid[64];
-    first_machine(job->machine_id, first_mid, sizeof(first_mid));
     char host[256];
-    int local = machine_host(first_mid, host, sizeof(host));
+    int local = machine_host(job->machine_id, host, sizeof(host));
 
     /* Force local execution when no SSH user is configured */
     if (!g_config.ssh_user[0]) local = 1;
@@ -1001,9 +977,9 @@ static int spawn_process(Job *job)
             setenv("ORCH_JOB_ID",        job->id,         1);
             setenv("ORCH_INPUT_DIR",     job->input_dir,  1);
             setenv("ORCH_OUTPUT_DIR",    job->output_dir, 1);
+            setenv("ORCH_WORKER_ID",     job->machine_id, 1);
             setenv("ORCH_MACHINE_IDS",   job->machine_id, 1);
-            char _nm[8]; snprintf(_nm, sizeof(_nm), "%d", job->n_machines);
-            setenv("ORCH_MACHINE_COUNT", _nm, 1);
+            setenv("ORCH_MACHINE_COUNT", "1", 1);
             if (g_config.pre_job_script_linux[0]) {
                 int pre_ret = system(g_config.pre_job_script_linux);
                 if (pre_ret != 0) {
@@ -1070,7 +1046,8 @@ static int spawn_process(Job *job)
     snprintf(remote_output, sizeof(remote_output),
         "%s/%s/output", g_config.ssh_remote_work_dir, job->id);
 
-    log_info("executor", "Job %s → remote %s (%s)", job->id, first_mid, host);
+    log_info("executor", "Job %s → remote %s (%s)",
+             job->id, job->machine_id, host);
 
 #define RUN_SYNC_FAIL(label, ...) do { \
     char _c[1024]; snprintf(_c, sizeof(_c), __VA_ARGS__); \
