@@ -4,6 +4,7 @@
 #include "job.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -68,6 +69,23 @@ int main(void)
     BatchRecord loaded;
     if (db_get_batch(batch.id, &loaded) != 0 ||
         strcmp(loaded.name, batch.name) != 0) return 1;
+
+    Job *listed_jobs = NULL;
+    int listed_count = db_query_jobs("tester", -1, "shardsim", 1000, 0,
+                                     &listed_jobs);
+    if (listed_count != 1000) {
+        fprintf(stderr, "incorrect paginated batch job count\n");
+        free(listed_jobs);
+        return 1;
+    }
+    for (int i = 0; i < listed_count; i++) {
+        if (strcmp(listed_jobs[i].batch_id, batch.id) != 0) {
+            fprintf(stderr, "batch id missing from paginated job listing\n");
+            free(listed_jobs);
+            return 1;
+        }
+    }
+    free(listed_jobs);
 
     BatchRecord rolled_back = batch;
     strcpy(rolled_back.id, "rolled-back");

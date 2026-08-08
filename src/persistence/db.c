@@ -566,7 +566,7 @@ int db_query_jobs(const char *user_id, int status, const char *app_id,
         "SELECT id,command,status,priority,req_cores,req_gpu,req_ram_mb,"
         "req_disk_mb,machine_id,input_dir,output_dir,exit_code,"
         "submitted_at,started_at,ended_at,input_files,timeout_seconds,status_reason,"
-        "user_id,app_id,depends_on,workflow_id,same_machine_as FROM jobs "
+        "user_id,app_id,depends_on,workflow_id,same_machine_as,batch_id FROM jobs "
         "WHERE (?1='' OR user_id=?1) AND (?2<0 OR status=?2) "
         "AND (?3='' OR app_id=?3) "
         "ORDER BY submitted_at DESC LIMIT ?4 OFFSET ?5;";
