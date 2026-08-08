@@ -44,7 +44,7 @@ static int transition_allowed(JobStatus from, JobStatus to)
         case JOB_STATUS_HELD:      return to == JOB_STATUS_IN_QUEUE   || to == JOB_STATUS_CANCELLED;
         case JOB_STATUS_IN_QUEUE:  return to == JOB_STATUS_STARTING  || to == JOB_STATUS_CANCELLED;
         case JOB_STATUS_STARTING:  return to == JOB_STATUS_RUNNING   || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
-        case JOB_STATUS_RUNNING:   return to == JOB_STATUS_FINISHED  || to == JOB_STATUS_FAILED;
+        case JOB_STATUS_RUNNING:   return to == JOB_STATUS_FINISHED  || to == JOB_STATUS_FAILED || to == JOB_STATUS_CANCELLED;
         default:                   return 0; /* terminal states */
     }
 }

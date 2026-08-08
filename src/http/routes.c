@@ -2,6 +2,7 @@
 #include "job.h"
 #include "queue.h"
 #include "scheduler.h"
+#include "executor.h"
 #include "resources.h"
 #include "transfer.h"
 #include "config.h"
@@ -1375,7 +1376,7 @@ static void cancel_job(struct mg_connection *c, struct mg_http_message *hm,
         return;
     }
     job_set_status_r(job, JOB_STATUS_CANCELLED, "Cancelled by user");
-    alloc_release(job_id);
+    executor_terminate(job_id);
     cJSON *resp = job_to_json(job);
     char *s = cJSON_PrintUnformatted(resp);
     http_json_reply(c, 200, s);

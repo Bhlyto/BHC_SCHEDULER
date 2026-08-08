@@ -6,6 +6,11 @@ include(CTest)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# The scheduler, HTTP server, launcher and watcher threads share the SQLite
+# connection. Keep serialized mode enabled consistently for every target that
+# compiles the bundled sqlite3.c, including tests.
+add_compile_definitions(SQLITE_THREADSAFE=1)
+
 # ──────────────────────────────────────────────
 # Output directories
 # ──────────────────────────────────────────────
@@ -103,11 +108,20 @@ add_executable(presim_e2e_test
 target_include_directories(presim_e2e_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(presim_e2e_test ${PLATFORM_LIBS})
 
+add_executable(lifecycle_test
+    src/tools/lifecycle_test.c
+    ${CORE_SOURCES}
+    ${VENDOR_SOURCES}
+)
+target_include_directories(lifecycle_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(lifecycle_test ${PLATFORM_LIBS})
+
 if(BUILD_TESTING)
     add_test(NAME decision_core COMMAND $<TARGET_FILE:dc_test>)
     add_test(NAME presim_e2e COMMAND $<TARGET_FILE:presim_e2e_test>)
+    add_test(NAME lifecycle COMMAND $<TARGET_FILE:lifecycle_test>)
 
-    set_tests_properties(decision_core presim_e2e PROPERTIES
+    set_tests_properties(decision_core presim_e2e lifecycle PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     )
 endif()
@@ -138,7 +152,6 @@ endif()
 # which would fail on platforms where the file is absent.
 target_compile_definitions(orchestrator PRIVATE
     MG_TLS=0
-    SQLITE_THREADSAFE=1
 )
 
 if(WIN32)

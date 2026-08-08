@@ -9,6 +9,7 @@
 #include "db.h"
 #include "events.h"
 #include "transfer.h"
+#include "executor.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -32,8 +33,6 @@ static void trim_local(char *s)
 #  include <unistd.h>
 #  define sleep_ms(ms) usleep((ms) * 1000)
 #endif
-
-int executor_spawn(Job *job);
 
 static Queue *s_queue    = NULL;
 static int    s_running  = 0;
@@ -271,8 +270,6 @@ static void scheduler_check_held_jobs(void)
 /* ── Periodic: kill jobs that have exceeded their timeout ───────────────── */
 static void scheduler_check_timeouts(void)
 {
-    if (g_config.job_timeout_seconds <= 0) return;
-
     Job *jobs = (Job *)malloc(256 * sizeof(Job));
     if (!jobs) return;
 
@@ -296,20 +293,11 @@ static void scheduler_check_timeouts(void)
             char reason[128];
             snprintf(reason, sizeof(reason),
                 "Timed out after %.0f seconds (limit=%d s)", elapsed, limit);
-            db_update_job_status(j->id, JOB_STATUS_FAILED, -1, now);
-            db_update_status_reason(j->id, reason);
-            db_release_allocation(j->id);
-            alloc_release(j->id);
-            /* Auto-deprovision cloud machine if now idle */
-            if (g_config.cloud_auto_deprovision && j->machine_id[0]) {
-                Machine *tm = registry_get(j->machine_id);
-                if (tm && tm->type == MACHINE_TYPE_CLOUD &&
-                    tm->cores_reserved <= 0 && tm->ram_mb_reserved <= 0) {
-                    log_info("scheduler",
-                        "Auto-deprovisioning idle cloud machine %s after timeout",
-                        tm->id);
-                    cloud_deprovision(tm->cloud_provider, tm->cloud_instance_id);
-                }
+            j->exit_code = -1;
+            job_set_status_r(j, JOB_STATUS_FAILED, reason);
+            if (!executor_terminate(j->id)) {
+                db_release_allocation(j->id);
+                alloc_release(j->id);
             }
         }
     }
@@ -340,6 +328,16 @@ static void *scheduler_thread(void *arg)
 
         Job *job = queue_try_pop(s_queue);
         if (!job) continue;
+
+        /* The database is authoritative. A queued object may be stale when a
+           cancellation raced with the in-memory queue. */
+        Job *persisted = db_get_job(job->id);
+        if (!persisted || persisted->status != JOB_STATUS_IN_QUEUE) {
+            if (persisted) job_free(persisted);
+            job_free(job);
+            continue;
+        }
+        job_free(persisted);
 
         /* ── Quota enforcement ─────────────────────────────────── */
         {

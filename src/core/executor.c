@@ -11,6 +11,117 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <pthread.h>
+#  include <signal.h>
+#  include <sys/types.h>
+#  include <unistd.h>
+#endif
+
+#define MAX_ACTIVE_PROCESSES 4096
+
+typedef struct {
+    char job_id[JOB_ID_LEN];
+    int active;
+#ifdef _WIN32
+    HANDLE process_handle;
+    HANDLE job_object;
+#else
+    pid_t pid;
+#endif
+} ActiveProcess;
+
+static ActiveProcess s_active_processes[MAX_ACTIVE_PROCESSES];
+
+#ifdef _WIN32
+static SRWLOCK s_active_lock = SRWLOCK_INIT;
+#  define active_lock()   AcquireSRWLockExclusive(&s_active_lock)
+#  define active_unlock() ReleaseSRWLockExclusive(&s_active_lock)
+#else
+static pthread_mutex_t s_active_lock = PTHREAD_MUTEX_INITIALIZER;
+#  define active_lock()   pthread_mutex_lock(&s_active_lock)
+#  define active_unlock() pthread_mutex_unlock(&s_active_lock)
+#endif
+
+#ifdef _WIN32
+static int active_process_register(const char *job_id, HANDLE process_handle,
+                                   HANDLE job_object)
+#else
+static int active_process_register(const char *job_id, pid_t pid)
+#endif
+{
+    int registered = 0;
+    active_lock();
+    for (int i = 0; i < MAX_ACTIVE_PROCESSES; i++) {
+        ActiveProcess *p = &s_active_processes[i];
+        if (p->active) continue;
+        memset(p, 0, sizeof(*p));
+        strncpy(p->job_id, job_id, sizeof(p->job_id) - 1);
+#ifdef _WIN32
+        p->process_handle = process_handle;
+        p->job_object = job_object;
+#else
+        p->pid = pid;
+#endif
+        p->active = 1;
+        registered = 1;
+        break;
+    }
+    active_unlock();
+    return registered ? 0 : -1;
+}
+
+static void active_process_unregister(const char *job_id)
+{
+    active_lock();
+    for (int i = 0; i < MAX_ACTIVE_PROCESSES; i++) {
+        ActiveProcess *p = &s_active_processes[i];
+        if (p->active && strcmp(p->job_id, job_id) == 0) {
+            p->active = 0;
+            break;
+        }
+    }
+    active_unlock();
+}
+
+int executor_terminate(const char *job_id)
+{
+    int found = 0;
+    active_lock();
+    for (int i = 0; i < MAX_ACTIVE_PROCESSES; i++) {
+        ActiveProcess *p = &s_active_processes[i];
+        if (!p->active || strcmp(p->job_id, job_id) != 0) continue;
+        found = 1;
+#ifdef _WIN32
+        if (p->job_object)
+            TerminateJobObject(p->job_object, 1);
+        else if (p->process_handle)
+            TerminateProcess(p->process_handle, 1);
+#else
+        if (p->pid > 0) {
+            if (kill(-p->pid, SIGTERM) != 0)
+                kill(p->pid, SIGTERM);
+        }
+#endif
+        break;
+    }
+    active_unlock();
+    return found;
+}
+
+static int job_is_terminal_in_db(const char *job_id)
+{
+    Job *persisted = db_get_job(job_id);
+    if (!persisted) return 1;
+    int terminal = persisted->status == JOB_STATUS_FINISHED ||
+                   persisted->status == JOB_STATUS_FAILED ||
+                   persisted->status == JOB_STATUS_CANCELLED;
+    job_free(persisted);
+    return terminal;
+}
+
 /* ── Auto-deprovision helper ──────────────────────────────────────────── */
 static void maybe_auto_deprovision(const char *machine_id)
 {
@@ -240,6 +351,7 @@ static int write_run_script(const Job *job,
 typedef struct {
     Job    *job;
     HANDLE  proc_handle;
+    HANDLE  job_object;
     int     is_remote;
     char    remote_host[256];
     char    remote_output[512];
@@ -306,10 +418,13 @@ static DWORD WINAPI watcher_thread(LPVOID arg)
     WaitForSingleObject(wa->proc_handle, INFINITE);
     DWORD exit_code = 1;
     GetExitCodeProcess(wa->proc_handle, &exit_code);
+    active_process_unregister(wa->job->id);
     CloseHandle(wa->proc_handle);
 
+    int already_terminal = job_is_terminal_in_db(wa->job->id);
+
     /* For remote jobs: retrieve output files after the SSH process exits */
-    if (wa->is_remote && g_config.ssh_user[0]) {
+    if (!already_terminal && wa->is_remote && g_config.ssh_user[0]) {
         char ssh_opts[512];
         build_ssh_opts(ssh_opts, sizeof(ssh_opts), wa->known_hosts_path);
         char scp_cmd[1024];
@@ -326,17 +441,19 @@ static DWORD WINAPI watcher_thread(LPVOID arg)
                 scp_rc, wa->job->id);
     }
 
-    wa->job->exit_code = (int)exit_code;
-    char reason[280];
-    if (exit_code == 0) {
-        job_set_status_r(wa->job, JOB_STATUS_FINISHED, "Completed successfully");
-    } else if (wa->is_remote) {
-        _snprintf(reason, sizeof(reason), "Process exited with code %lu on %s",
-                  exit_code, wa->remote_host);
-        job_set_status_r(wa->job, JOB_STATUS_FAILED, reason);
-    } else {
-        _snprintf(reason, sizeof(reason), "Process exited with code %lu", exit_code);
-        job_set_status_r(wa->job, JOB_STATUS_FAILED, reason);
+    if (!already_terminal) {
+        wa->job->exit_code = (int)exit_code;
+        char reason[280];
+        if (exit_code == 0) {
+            job_set_status_r(wa->job, JOB_STATUS_FINISHED, "Completed successfully");
+        } else if (wa->is_remote) {
+            _snprintf(reason, sizeof(reason), "Process exited with code %lu on %s",
+                      exit_code, wa->remote_host);
+            job_set_status_r(wa->job, JOB_STATUS_FAILED, reason);
+        } else {
+            _snprintf(reason, sizeof(reason), "Process exited with code %lu", exit_code);
+            job_set_status_r(wa->job, JOB_STATUS_FAILED, reason);
+        }
     }
 
     db_release_allocation(wa->job->id);
@@ -344,6 +461,8 @@ static DWORD WINAPI watcher_thread(LPVOID arg)
     maybe_auto_deprovision(wa->job->machine_id);
     /* Clean up temp known_hosts file */
     if (wa->known_hosts_path[0]) DeleteFileA(wa->known_hosts_path);
+    if (wa->job_object) CloseHandle(wa->job_object);
+    job_free(wa->job);
     free(wa);
     return 0;
 }
@@ -399,7 +518,14 @@ static int spawn_process(Job *job)
             + strlen("ORCH_MACHINE_IDS=")   + strlen(job->machine_id)  + 1
             + strlen("ORCH_MACHINE_COUNT=") + strlen(n_machines_str)   + 1
             + 2;
-        char *env_block = (char *)malloc(parent_sz + extra_sz);
+        size_t env_capacity = parent_sz + extra_sz;
+        char *env_block = (char *)malloc(env_capacity);
+        if (!env_block) {
+            if (parent_env) FreeEnvironmentStrings(parent_env);
+            if (hStdout != INVALID_HANDLE_VALUE) CloseHandle(hStdout);
+            if (hStderr != INVALID_HANDLE_VALUE) CloseHandle(hStderr);
+            return -1;
+        }
         int env_pos = 0;
         if (parent_env && parent_sz > 0) {
             memcpy(env_block, parent_env, parent_sz);
@@ -408,7 +534,7 @@ static int spawn_process(Job *job)
         if (parent_env) FreeEnvironmentStrings(parent_env);
 
 #define ADD_ENV(k, v) do { \
-    int _n = _snprintf(env_block + env_pos, extra_sz, "%s=%s", k, v); \
+    int _n = _snprintf(env_block + env_pos, env_capacity - (size_t)env_pos, "%s=%s", k, v); \
     if (_n > 0) env_pos += _n + 1; \
 } while(0)
         ADD_ENV("ORCH_JOB_ID",        job->id);
@@ -482,6 +608,15 @@ static int spawn_process(Job *job)
         }
         free(env_block);
         wa = (WatchArg *)malloc(sizeof(WatchArg));
+        if (!wa) {
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            if (hStdout != INVALID_HANDLE_VALUE) CloseHandle(hStdout);
+            if (hStderr != INVALID_HANDLE_VALUE) CloseHandle(hStderr);
+            return -1;
+        }
         wa->is_remote = 0;
         wa->remote_host[0]        = '\0';
         wa->remote_output[0]      = '\0';
@@ -604,6 +739,15 @@ static int spawn_process(Job *job)
             return -1;
         }
         wa = (WatchArg *)malloc(sizeof(WatchArg));
+        if (!wa) {
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, INFINITE);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            if (hStdout != INVALID_HANDLE_VALUE) CloseHandle(hStdout);
+            if (hStderr != INVALID_HANDLE_VALUE) CloseHandle(hStderr);
+            return -1;
+        }
         wa->is_remote = 1;
         strncpy(wa->remote_host,        host,             sizeof(wa->remote_host)        - 1);
         strncpy(wa->remote_output,      remote_output,    sizeof(wa->remote_output)      - 1);
@@ -615,8 +759,43 @@ static int spawn_process(Job *job)
     CloseHandle(pi.hThread);
     wa->job = job;
     wa->proc_handle = pi.hProcess;
+    wa->job_object = CreateJobObjectA(NULL, NULL);
+    if (wa->job_object) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+        ZeroMemory(&limits, sizeof(limits));
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(wa->job_object,
+                                     JobObjectExtendedLimitInformation,
+                                     &limits, sizeof(limits)) ||
+            !AssignProcessToJobObject(wa->job_object, pi.hProcess)) {
+            CloseHandle(wa->job_object);
+            wa->job_object = NULL;
+        }
+    }
+    if (active_process_register(job->id, pi.hProcess, wa->job_object) != 0) {
+        if (wa->job_object) TerminateJobObject(wa->job_object, 1);
+        else TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        if (wa->job_object) CloseHandle(wa->job_object);
+        free(wa);
+        return -1;
+    }
+    if (!job_is_terminal_in_db(job->id))
+        job_set_status(job, JOB_STATUS_RUNNING);
+    else
+        executor_terminate(job->id);
     HANDLE th = CreateThread(NULL, 0, watcher_thread, wa, 0, NULL);
-    if (th) CloseHandle(th);
+    if (!th) {
+        executor_terminate(job->id);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        active_process_unregister(job->id);
+        CloseHandle(pi.hProcess);
+        if (wa->job_object) CloseHandle(wa->job_object);
+        free(wa);
+        return -1;
+    }
+    CloseHandle(th);
     return 0;
 }
 
@@ -629,14 +808,21 @@ static DWORD WINAPI launcher_thread(LPVOID arg)
     LaunchArg *la = (LaunchArg *)arg;
     Job *job = la->job;
     free(la);
-    if (spawn_process(job) != 0) {
-        const char *r = job->status_reason[0]
-            ? job->status_reason : "Failed to spawn process";
-        job_set_status_r(job, JOB_STATUS_FAILED, r);
+    if (job_is_terminal_in_db(job->id)) {
         alloc_release(job->id);
+        job_free(job);
+        return 0;
+    }
+    if (spawn_process(job) != 0) {
+        if (!job_is_terminal_in_db(job->id)) {
+            const char *r = job->status_reason[0]
+                ? job->status_reason : "Failed to spawn process";
+            job_set_status_r(job, JOB_STATUS_FAILED, r);
+        }
+        alloc_release(job->id);
+        job_free(job);
         return 1;
     }
-    job_set_status(job, JOB_STATUS_RUNNING);
     return 0;
 }
 
@@ -665,9 +851,11 @@ static void *watcher_thread(void *arg)
     int wstatus = 0;
     waitpid(wa->pid, &wstatus, 0);
     int exit_code = WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : 1;
+    active_process_unregister(wa->job->id);
+    int already_terminal = job_is_terminal_in_db(wa->job->id);
 
     /* For remote jobs: retrieve output files after SSH exits */
-    if (wa->is_remote && g_config.ssh_user[0]) {
+    if (!already_terminal && wa->is_remote && g_config.ssh_user[0]) {
         char ssh_opts[512];
         build_ssh_opts(ssh_opts, sizeof(ssh_opts), wa->known_hosts_path);
         char scp_cmd[1024];
@@ -684,17 +872,19 @@ static void *watcher_thread(void *arg)
                 scp_rc, wa->job->id);
     }
 
-    wa->job->exit_code = exit_code;
-    char reason[280];
-    if (exit_code == 0) {
-        job_set_status_r(wa->job, JOB_STATUS_FINISHED, "Completed successfully");
-    } else if (wa->is_remote) {
-        snprintf(reason, sizeof(reason), "Process exited with code %d on %s",
-                 exit_code, wa->remote_host);
-        job_set_status_r(wa->job, JOB_STATUS_FAILED, reason);
-    } else {
-        snprintf(reason, sizeof(reason), "Process exited with code %d", exit_code);
-        job_set_status_r(wa->job, JOB_STATUS_FAILED, reason);
+    if (!already_terminal) {
+        wa->job->exit_code = exit_code;
+        char reason[280];
+        if (exit_code == 0) {
+            job_set_status_r(wa->job, JOB_STATUS_FINISHED, "Completed successfully");
+        } else if (wa->is_remote) {
+            snprintf(reason, sizeof(reason), "Process exited with code %d on %s",
+                     exit_code, wa->remote_host);
+            job_set_status_r(wa->job, JOB_STATUS_FAILED, reason);
+        } else {
+            snprintf(reason, sizeof(reason), "Process exited with code %d", exit_code);
+            job_set_status_r(wa->job, JOB_STATUS_FAILED, reason);
+        }
     }
 
     db_release_allocation(wa->job->id);
@@ -702,6 +892,7 @@ static void *watcher_thread(void *arg)
     maybe_auto_deprovision(wa->job->machine_id);
     /* Clean up temp known_hosts file */
     if (wa->known_hosts_path[0]) remove(wa->known_hosts_path);
+    job_free(wa->job);
     free(wa);
     return NULL;
 }
@@ -731,6 +922,7 @@ static int spawn_process(Job *job)
         pid_t pid = fork();
         if (pid < 0) { log_error("executor", "fork() failed"); wordfree(&we); return -1; }
         if (pid == 0) {
+            setpgid(0, 0);
             int fdo = open(stdout_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             int fde = open(stderr_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fdo >= 0) { dup2(fdo, STDOUT_FILENO); close(fdo); }
@@ -753,14 +945,36 @@ static int spawn_process(Job *job)
             _exit(127);
         }
         wordfree(&we);
+        setpgid(pid, pid);
+        if (active_process_register(job->id, pid) != 0) {
+            kill(-pid, SIGTERM);
+            waitpid(pid, NULL, 0);
+            return -1;
+        }
         WatchArg *wa = (WatchArg *)malloc(sizeof(WatchArg));
+        if (!wa) {
+            executor_terminate(job->id);
+            waitpid(pid, NULL, 0);
+            active_process_unregister(job->id);
+            return -1;
+        }
         wa->job = job; wa->pid = pid;
         wa->is_remote = 0;
         wa->remote_host[0]      = '\0';
         wa->remote_output[0]    = '\0';
         wa->known_hosts_path[0] = '\0';
+        if (!job_is_terminal_in_db(job->id))
+            job_set_status(job, JOB_STATUS_RUNNING);
+        else
+            executor_terminate(job->id);
         pthread_t th;
-        pthread_create(&th, NULL, watcher_thread, wa);
+        if (pthread_create(&th, NULL, watcher_thread, wa) != 0) {
+            executor_terminate(job->id);
+            waitpid(pid, NULL, 0);
+            active_process_unregister(job->id);
+            free(wa);
+            return -1;
+        }
         pthread_detach(th);
         return 0;
     }
@@ -843,23 +1057,46 @@ static int spawn_process(Job *job)
         return -1;
     }
     if (pid == 0) {
+        setpgid(0, 0);
         if (fdo >= 0) { dup2(fdo, STDOUT_FILENO); close(fdo); }
         if (fde >= 0) { dup2(fde, STDERR_FILENO); close(fde); }
         execvp(we.we_wordv[0], we.we_wordv);
         _exit(127);
     }
+    setpgid(pid, pid);
     wordfree(&we);
     if (fdo >= 0) close(fdo);
     if (fde >= 0) close(fde);
 
+    if (active_process_register(job->id, pid) != 0) {
+        kill(-pid, SIGTERM);
+        waitpid(pid, NULL, 0);
+        return -1;
+    }
     WatchArg *wa = (WatchArg *)malloc(sizeof(WatchArg));
+    if (!wa) {
+        executor_terminate(job->id);
+        waitpid(pid, NULL, 0);
+        active_process_unregister(job->id);
+        return -1;
+    }
     wa->job = job; wa->pid = pid;
     wa->is_remote = 1;
     strncpy(wa->remote_host,        host,             sizeof(wa->remote_host)      - 1);
     strncpy(wa->remote_output,      remote_output,    sizeof(wa->remote_output)    - 1);
     strncpy(wa->known_hosts_path,   known_hosts_path, sizeof(wa->known_hosts_path) - 1);
+    if (!job_is_terminal_in_db(job->id))
+        job_set_status(job, JOB_STATUS_RUNNING);
+    else
+        executor_terminate(job->id);
     pthread_t th;
-    pthread_create(&th, NULL, watcher_thread, wa);
+    if (pthread_create(&th, NULL, watcher_thread, wa) != 0) {
+        executor_terminate(job->id);
+        waitpid(pid, NULL, 0);
+        active_process_unregister(job->id);
+        free(wa);
+        return -1;
+    }
     pthread_detach(th);
     return 0;
 }
@@ -870,14 +1107,21 @@ static void *launcher_thread(void *arg)
     LaunchArg *la = (LaunchArg *)arg;
     Job *job = la->job;
     free(la);
-    if (spawn_process(job) != 0) {
-        const char *r = job->status_reason[0]
-            ? job->status_reason : "Failed to spawn process";
-        job_set_status_r(job, JOB_STATUS_FAILED, r);
+    if (job_is_terminal_in_db(job->id)) {
         alloc_release(job->id);
+        job_free(job);
         return NULL;
     }
-    job_set_status(job, JOB_STATUS_RUNNING);
+    if (spawn_process(job) != 0) {
+        if (!job_is_terminal_in_db(job->id)) {
+            const char *r = job->status_reason[0]
+                ? job->status_reason : "Failed to spawn process";
+            job_set_status_r(job, JOB_STATUS_FAILED, r);
+        }
+        alloc_release(job->id);
+        job_free(job);
+        return NULL;
+    }
     return NULL;
 }
 
@@ -900,6 +1144,7 @@ int executor_spawn(Job *job)
     if (!la) {
         job_set_status_r(job, JOB_STATUS_FAILED, "Out of memory");
         alloc_release(job->id);
+        job_free(job);
         return -1;
     }
     la->job = job;
@@ -910,6 +1155,7 @@ int executor_spawn(Job *job)
         free(la);
         job_set_status_r(job, JOB_STATUS_FAILED, "Failed to create launcher thread");
         alloc_release(job->id);
+        job_free(job);
         return -1;
     }
     CloseHandle(th);
@@ -919,6 +1165,7 @@ int executor_spawn(Job *job)
         free(la);
         job_set_status_r(job, JOB_STATUS_FAILED, "Failed to create launcher thread");
         alloc_release(job->id);
+        job_free(job);
         return -1;
     }
     pthread_detach(th);
