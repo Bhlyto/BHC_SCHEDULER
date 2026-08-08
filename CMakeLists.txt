@@ -167,6 +167,14 @@ add_executable(retry_test
 target_include_directories(retry_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(retry_test ${PLATFORM_LIBS})
 
+add_executable(scale_test
+    src/tools/scale_test.c
+    ${CORE_SOURCES}
+    ${VENDOR_SOURCES}
+)
+target_include_directories(scale_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(scale_test ${PLATFORM_LIBS})
+
 if(BUILD_TESTING)
     add_test(NAME decision_core COMMAND $<TARGET_FILE:dc_test>)
     add_test(NAME presim_e2e COMMAND $<TARGET_FILE:presim_e2e_test>)
@@ -177,10 +185,12 @@ if(BUILD_TESTING)
     add_test(NAME batch COMMAND $<TARGET_FILE:batch_test>)
     add_test(NAME artifact COMMAND $<TARGET_FILE:artifact_test>)
     add_test(NAME retry COMMAND $<TARGET_FILE:retry_test>)
+    add_test(NAME scale_1000 COMMAND $<TARGET_FILE:scale_test>)
 
-    set_tests_properties(decision_core presim_e2e lifecycle allocator recovery queue batch artifact retry PROPERTIES
+    set_tests_properties(decision_core presim_e2e lifecycle allocator recovery queue batch artifact retry scale_1000 PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     )
+    set_tests_properties(scale_1000 PROPERTIES TIMEOUT 120 LABELS "scale")
 endif()
 
 # Copy config/ next to the executable after each build
