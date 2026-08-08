@@ -61,4 +61,9 @@ int  http_stream_file(struct mg_connection *c, const char *filepath);
 /* Main Mongoose event callback — registered by httpd_start(). */
 void routes_handler(struct mg_connection *c, int ev, void *ev_data);
 
+void batches_submit(struct mg_connection *c, struct mg_http_message *hm,
+                    const char *auth_user_id);
+void batches_get(struct mg_connection *c, const char *batch_id,
+                 const char *auth_user_id, const char *auth_role);
+
 #endif /* HTTP_H */

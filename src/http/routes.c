@@ -92,6 +92,7 @@ static cJSON *job_to_json(const Job *job)
     cJSON_AddStringToObject(obj, "app_id",            job->app_id);
     cJSON_AddStringToObject(obj, "depends_on",        job->depends_on);
     cJSON_AddStringToObject(obj, "workflow_id",       job->workflow_id);
+    cJSON_AddStringToObject(obj, "batch_id",          job->batch_id);
     cJSON_AddStringToObject(obj, "same_machine_as",   job->same_machine_as);
     return obj;
 }
@@ -2946,6 +2947,16 @@ void routes_handler(struct mg_connection *c, int ev, void *ev_data)
     }
 
     /* /apps — available to all authenticated users */
+    if (strcmp(seg[0], "batches") == 0) {
+        if (strcmp(method, "POST") == 0 && seg[1][0] == '\0') {
+            batches_submit(c, hm, auth_user_id); return;
+        }
+        if (strcmp(method, "GET") == 0 && seg[1][0] != '\0' && seg[2][0] == '\0') {
+            batches_get(c, seg[1], auth_user_id, auth_role); return;
+        }
+        http_error(c, 404, "Not found"); return;
+    }
+
     if (strcmp(seg[0], "apps") == 0) {
         if (strcmp(method, "GET") == 0 && seg[1][0] == '\0') {
             list_apps(c, hm); return;

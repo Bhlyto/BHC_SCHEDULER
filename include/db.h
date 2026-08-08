@@ -18,6 +18,9 @@ typedef struct {
 
 int db_open(const char *path);
 void db_close(void);
+int db_begin(void);
+int db_commit(void);
+void db_rollback(void);
 
 /* ── Jobs ──────────────────────────────────────── */
 int db_insert_job(const Job *job);
@@ -35,6 +38,28 @@ int  db_list_queued_jobs(Job *jobs, int max_count, int offset);
 /* Mark STARTING/RUNNING jobs as failed after a scheduler restart and release
    their persisted allocations. Returns the number of recovered jobs. */
 int  db_recover_incomplete_jobs(void);
+int  db_update_job_batch_id(const char *job_id, const char *batch_id);
+
+typedef struct {
+    char id[64];
+    char name[256];
+    char user_id[128];
+    time_t created_at;
+} BatchRecord;
+
+typedef struct {
+    int total;
+    int created;
+    int queued;
+    int running;
+    int succeeded;
+    int failed;
+    int cancelled;
+} BatchStats;
+
+int db_insert_batch(const BatchRecord *batch);
+int db_get_batch(const char *batch_id, BatchRecord *out);
+int db_get_batch_stats(const char *batch_id, BatchStats *out);
 
 int  db_insert_api_key(const char *key_hash, const char *label);
 int  db_insert_api_key_ex(const char *key_hash, const char *label,

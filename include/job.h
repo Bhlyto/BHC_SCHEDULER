@@ -47,6 +47,7 @@ typedef struct {
     char       status_reason[256]; /* human-readable cause of the last status transition */
     char       depends_on[2048]; /* comma-separated job IDs this job depends on */
     char       workflow_id[64];  /* groups jobs submitted together via a workflow */
+    char       batch_id[64];     /* simple v1 grouping, independent of workflows */
     char       same_machine_as[JOB_ID_LEN]; /* job ID whose machine this job must reuse */
 } Job;
 

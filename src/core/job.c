@@ -92,7 +92,11 @@ Job *job_create_ex(const char *command, int priority,
     job->req_disk_mb = req_disk_mb> 0 ? req_disk_mb : 0;
     job->submitted_at = time(NULL);
 
-    db_insert_job(job);
+    if (db_insert_job(job) != 0) {
+        log_error("job", "Failed to persist new job %s", job->id);
+        free(job);
+        return NULL;
+    }
     log_info("job", "Created job %s: %s (user=%s app=%s)",
              job->id, job->command, job->user_id, job->app_id);
     return job;

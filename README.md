@@ -7,6 +7,7 @@ A lightweight daemon written in C that exposes a REST API for submitting, tracki
 ## Features
 
 - **Job queue** — submit commands with resource requirements; the scheduler dispatches them as machines become available
+- **Transactional batches** — submit up to 1000 independent jobs atomically and query aggregate progress
 - **Priority scheduling** — lower priority value = higher priority (default `50`)
 - **Resource-aware allocation** — jobs declare `req_cores`, `req_gpu`, `req_ram_mb`, `req_disk_mb`; the allocator matches them against available capacity
 - **Multi-machine jobs** — when no single machine can satisfy a core request, the allocator can spread the job across multiple machines automatically

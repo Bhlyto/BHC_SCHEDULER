@@ -216,6 +216,46 @@ Opens a persistent `text/event-stream` connection.
 
 ---
 
+## Batches
+
+### Submit a batch
+
+```http
+POST /batches
+```
+
+Creates between 1 and 1000 independent jobs in one SQLite transaction. Either
+the batch and all jobs are committed, or none are. The request body is limited
+to 16 MB.
+
+```json
+{
+  "name": "ShardSim campaign",
+  "jobs": [
+    {
+      "command": "shardsim --scenario scenario-001.json",
+      "req_cores": 4,
+      "req_ram_mb": 8192,
+      "timeout_seconds": 3600,
+      "app_id": "shardsim"
+    }
+  ]
+}
+```
+
+The response contains the batch id and aggregate counters. Each created job
+also exposes its `batch_id` through the jobs API.
+
+### Get batch progress
+
+```http
+GET /batches/:id
+```
+
+Returns `total`, `created`, `queued`, `running`, `succeeded`, `failed`,
+`cancelled`, `completed`, and a `progress` value between 0 and 1. Batch state
+is derived from its jobs; it is not a separate workflow state machine.
+
 ## Resources
 
 ### List machines
