@@ -206,6 +206,12 @@ if(BUILD_TESTING)
     set_tests_properties(decision_core presim_e2e PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
 endif()
 
+# Deterministic synthetic payload used to qualify the v1 queue without a solver.
+# Campaigns vary its algebraic inputs and pseudo-random sleep duration.
+add_executable(bhc_synthetic_workload
+    src/tools/synthetic_workload.c
+)
+
 # Copy config/ next to the executable after each build
 add_custom_command(TARGET orchestrator POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -263,7 +269,7 @@ if(ORCH_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_link_options(presim_runner PRIVATE -fsanitize=address,undefined)
 endif()
 
-install(TARGETS orchestrator presim_runner RUNTIME DESTINATION bin)
+install(TARGETS orchestrator presim_runner bhc_synthetic_workload RUNTIME DESTINATION bin)
 install(DIRECTORY config web DESTINATION bin)
 install(FILES orchestrator.service DESTINATION share/bhc-scheduler OPTIONAL)
 
