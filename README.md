@@ -35,7 +35,9 @@ and uses Mongoose, SQLite, cJSON, SSH, and a filesystem artifact backend.
 The legacy web UI, saved workflows, cloud/Wake-on-LAN controls, and
 presimulation hooks are compiled for migration compatibility but disabled by
 default. They are not part of the v1 support contract. See
-[V1 scope and decisions](doc/v1-scope.md).
+[V1 scope and decisions](doc/v1-scope.md). The `v1.0.0` release evidence covers
+the localhost topology and is recorded in the
+[V1 localhost bulk qualification](doc/v1-local-qualification.md).
 
 ---
 

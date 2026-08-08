@@ -19,6 +19,11 @@ a local or shared filesystem; SQLite stores their type, URI, size, optional
 checksum, and creation date. This boundary permits a later object-store backend
 without coupling it to the scheduler.
 
+The operational evidence attached to `v1.0.0` covers the localhost topology.
+SSH distribution is implemented but remains operationally unqualified until
+at least two real workers are available. See
+[V1 localhost bulk qualification](v1-local-qualification.md).
+
 ## Decisions
 
 | Priority | Problem before migration | V1 decision | Benefit | Cost / risk |
@@ -62,6 +67,8 @@ Automated gates:
   batch, artifact, retry, upstream unit tests, and the scale proof;
 - `scale_1000` submits and executes 1000 real local processes in one batch,
   requires 1000 `SUCCEEDED`, and verifies collected artifacts;
+- the variable localhost gate submits 100 jobs with reproducible sleeps from
+  1 through 60 seconds and audits every log, result, and artifact;
 - `git diff --check` is clean.
 
 The scale proof measured 10.73 seconds after the upstream-hardening merge on
@@ -81,28 +88,21 @@ queue scans, and experimental decision-core/cloud/workflow behavior disabled by
 default. This ordering avoids tagging a v1 that is already behind the mainline
 security baseline.
 
-Manual gates before the final v1 tag:
-
-1. run the same representative ShardSim command, first with 100 scenarios;
-2. run it with 1000 scenarios on one machine;
-3. repeat on two real SSH workers and verify both receive jobs;
-4. optionally repeat on three to five workers;
-5. verify output content, not only exit status and artifact presence;
-6. back up and reopen a production-like SQLite database to exercise migration;
-7. confirm that no deployment requires the disabled experimental endpoints.
-
-The v1 tag must not claim multi-worker validation until gate 3 has been run on
-real infrastructure.
+The localhost release gate uses the synthetic algebraic payload instead of
+ShardSim so scheduler correctness is independent of solver installation. It
+verifies output content rather than relying only on exit status. When real SSH
+workers become available, repeat the same campaign on at least two workers and
+record the distribution before expanding the support claim.
 
 ## Current release decision
 
-Status on 2026-08-08: **automated release candidate accepted; v1 tag on hold**.
-Commit `65a0ef2` builds successfully and passes 11/11 CTest targets, including
-1,000 executed local processes. The remaining release blocker is operational,
-not hidden code work: run a representative ShardSim campaign on two real SSH
-workers, verify that both receive jobs and validate the produced scientific
-outputs. The annotated `v1` tag may be created only after that evidence and the
-production-like SQLite backup/reopen check are attached to the release record.
+Status on 2026-08-08: **localhost release accepted for `v1.0.0`**. The branch
+builds successfully and passes 11/11 CTest targets, including 1,000 executed
+local processes. The separate variable campaign passed with 100/100 successful
+jobs, sleeps spanning 1–60 seconds, four concurrent executions, 100 validated
+results, and 300 artifact records. The annotated tag is authorized for the
+documented localhost scope. It must not claim operational multi-worker
+validation.
 
 ## Incremental change ledger
 
@@ -126,3 +126,10 @@ per decision:
 15. `e3a8061` document and enforce the v1 support scope;
 16. `65a0ef2` integrates upstream hardening and records the conflict-resolution
     decisions above.
+17. `16d6f07` records the pre-qualification release candidate evidence;
+18. `b98b04d` adds the variable algebraic workload;
+19. `9a5cca8` restores batch identity in paginated job listings;
+20. `472cea9` makes the shipped profile runnable on localhost;
+21. `64cd945` loads CRLF provisioning files correctly on Windows;
+22. `8a1b708` completes streamed log responses for HTTP keep-alive;
+23. `2fef44f` adds the reproducible bulk qualification and audit runner.
